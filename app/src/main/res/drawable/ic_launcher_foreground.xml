@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- PAI logo v7: 5-row geometric block grid -->
+    <!-- Safe zone is 66x66 centered (21,21 to 87,87) -->
+    <!-- Row height=11, gap=3. Columns: left(15), gap(18), mid(16), right(17) -->
+
+    <!-- Row 1: full bar dark navy (21-70) + light blue (70-87) -->
+    <path android:fillColor="#002B80" android:pathData="M21,21 h49 v11 h-49 z"/>
+    <path android:fillColor="#A3CFFF" android:pathData="M70,21 h17 v11 h-17 z"/>
+
+    <!-- Row 2: left dark (21-36), mid dark (54-70), right light (70-87) -->
+    <path android:fillColor="#002B80" android:pathData="M21,35 h15 v11 h-15 z"/>
+    <path android:fillColor="#002B80" android:pathData="M54,35 h16 v11 h-16 z"/>
+    <path android:fillColor="#A3CFFF" android:pathData="M70,35 h17 v11 h-17 z"/>
+
+    <!-- Row 3: full bar dark navy (21-70) + light blue (70-87) -->
+    <path android:fillColor="#002B80" android:pathData="M21,49 h49 v11 h-49 z"/>
+    <path android:fillColor="#A3CFFF" android:pathData="M70,49 h17 v11 h-17 z"/>
+
+    <!-- Row 4: left dark (21-36), mid cornflower (54-70), right light (70-87) -->
+    <path android:fillColor="#002B80" android:pathData="M21,63 h15 v11 h-15 z"/>
+    <path android:fillColor="#5B9BFF" android:pathData="M54,63 h16 v11 h-16 z"/>
+    <path android:fillColor="#A3CFFF" android:pathData="M70,63 h17 v11 h-17 z"/>
+
+    <!-- Row 5: left dark (21-36), mid cornflower (54-70), right light (70-87) -->
+    <path android:fillColor="#002B80" android:pathData="M21,77 h15 v11 h-15 z"/>
+    <path android:fillColor="#5B9BFF" android:pathData="M54,77 h16 v11 h-16 z"/>
+    <path android:fillColor="#A3CFFF" android:pathData="M70,77 h17 v11 h-17 z"/>
+
+</vector>

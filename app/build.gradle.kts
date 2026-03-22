@@ -38,6 +38,10 @@ android {
     buildFeatures {
         compose = true
     }
+
+    androidResources {
+        noCompress += "zip"
+    }
 }
 
 dependencies {

@@ -44,6 +44,17 @@ class BootstrapInstaller(
     fun install() {
         Thread {
             try {
+                // 1. Try bundled bootstrap from APK assets (instant, no download)
+                val assetZip = extractAssetBootstrap()
+                if (assetZip != null) {
+                    Log.i(TAG, "Using bundled bootstrap from assets (${assetZip.length()} bytes)")
+                    post { onProgress("Extracting bundled bootstrap...") }
+                    extractBootstrap(assetZip)
+                    post { onComplete(true) }
+                    return@Thread
+                }
+
+                // 2. Try local file on external storage
                 val localFile = File(context.getExternalFilesDir(null), "bootstrap-aarch64.zip")
                 if (localFile.exists() && localFile.length() > 1_000_000) {
                     Log.i(TAG, "Found local bootstrap: ${localFile.absolutePath} (${localFile.length()} bytes)")
@@ -53,6 +64,7 @@ class BootstrapInstaller(
                     return@Thread
                 }
 
+                // 3. Download from network
                 post { onProgress("Downloading Termux bootstrap...") }
                 Log.i(TAG, "Starting download: $BOOTSTRAP_URL")
                 downloadAndExtract(localFile)
@@ -63,6 +75,37 @@ class BootstrapInstaller(
                 post { onComplete(false) }
             }
         }.start()
+    }
+
+    /**
+     * Extracts bootstrap-aarch64.zip from APK assets to a temp file.
+     * Returns the temp file if found, null if no bundled bootstrap exists.
+     */
+    private fun extractAssetBootstrap(): File? {
+        return try {
+            val input = context.assets.open("bootstrap-aarch64.zip")
+            val tempFile = File(context.cacheDir, "bootstrap-aarch64.zip")
+            input.use { src ->
+                FileOutputStream(tempFile).use { dst ->
+                    val buffer = ByteArray(8192)
+                    var total = 0L
+                    var len: Int
+                    while (src.read(buffer).also { len = it } != -1) {
+                        dst.write(buffer, 0, len)
+                        total += len
+                        if (total % (5 * 1024 * 1024) == 0L) {
+                            val mb = total / (1024 * 1024)
+                            post { onProgress("Preparing bootstrap... ${mb}MB") }
+                        }
+                    }
+                }
+            }
+            Log.i(TAG, "Extracted asset bootstrap to ${tempFile.absolutePath} (${tempFile.length()} bytes)")
+            tempFile
+        } catch (e: java.io.FileNotFoundException) {
+            Log.i(TAG, "No bundled bootstrap in assets")
+            null
+        }
     }
 
     // ── Download ──
