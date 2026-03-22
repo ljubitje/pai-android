@@ -1,6 +1,9 @@
 package kle.ljubitje.pai
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -12,11 +15,15 @@ import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.URL
 import java.util.zip.ZipInputStream
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.SNIHostName
 
 /**
  * Downloads and extracts the Termux bootstrap archive into $PREFIX.
- * Uses HttpURLConnection for reliable downloading with redirect support.
- * Extraction runs on a background thread.
+ * Uses ConnectivityManager for proper network binding (works with VPNs).
+ * Falls back to DNS-over-HTTPS if system DNS fails.
  */
 class BootstrapInstaller(
     private val context: Context,
@@ -29,17 +36,21 @@ class BootstrapInstaller(
         private const val TAG = "BootstrapInstaller"
         private const val BOOTSTRAP_URL =
             "https://github.com/termux/termux-packages/releases/latest/download/bootstrap-aarch64.zip"
+        private const val CLOUDFLARE_DOH = "https://1.1.1.1/dns-query"
+        private const val GOOGLE_DOH = "https://8.8.8.8/resolve"
 
         fun isBootstrapped(prefix: String): Boolean =
             File("$prefix/bin/bash").exists() || File("$prefix/bin/sh").exists()
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val connectivityManager by lazy {
+        context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    }
 
     fun install() {
         Thread {
             try {
-                // Check for pre-placed bootstrap file first (e.g. from ADB push or prior download)
                 val localFile = File(context.getExternalFilesDir(null), "bootstrap-aarch64.zip")
                 if (localFile.exists() && localFile.length() > 1_000_000) {
                     Log.i(TAG, "Found local bootstrap: ${localFile.absolutePath} (${localFile.length()} bytes)")
@@ -49,7 +60,6 @@ class BootstrapInstaller(
                     return@Thread
                 }
 
-                // Download via HttpURLConnection
                 post { onProgress("Downloading Termux bootstrap...") }
                 Log.i(TAG, "Starting download: $BOOTSTRAP_URL")
                 downloadAndExtract(localFile)
@@ -62,113 +72,125 @@ class BootstrapInstaller(
         }.start()
     }
 
-    private fun resolveWithFallback(hostname: String): InetAddress {
-        return try {
-            InetAddress.getByName(hostname)
-        } catch (e: Exception) {
-            Log.w(TAG, "System DNS failed for $hostname, trying Mullvad DNS (194.242.2.2)")
-            // Use Mullvad unfiltered DNS as fallback via UDP query
-            val resolver = miniDnsResolve(hostname, "194.242.2.2")
-            if (resolver != null) resolver
-            else throw RuntimeException("DNS resolution failed for $hostname (system + Mullvad fallback)")
+    // ── Network-aware connection opening ──
+
+    /**
+     * Opens a connection bound to a specific network.
+     * On Android with VPNs, unbound sockets may get ECONNREFUSED.
+     */
+    private fun openConnection(url: URL, network: Network? = null): HttpURLConnection {
+        val net = network ?: connectivityManager.activeNetwork
+        if (net != null) {
+            Log.d(TAG, "Opening connection via network: $net")
+            return net.openConnection(url) as HttpURLConnection
         }
+        Log.d(TAG, "No active network, using default connection")
+        return url.openConnection() as HttpURLConnection
     }
 
-    private fun miniDnsResolve(hostname: String, dnsServer: String): InetAddress? {
-        try {
-            val socket = java.net.DatagramSocket()
-            socket.soTimeout = 5000
+    /**
+     * Gets all available networks ordered by preference: active first,
+     * then underlying networks (WiFi behind VPN), then all others.
+     */
+    private fun getNetworksToTry(): List<Network?> {
+        val networks = mutableListOf<Network?>()
+        val active = connectivityManager.activeNetwork
+        if (active != null) networks.add(active)
 
-            // Build a minimal DNS A record query
-            val txId = (Math.random() * 65535).toInt()
-            val query = buildDnsQuery(txId, hostname)
-            val serverAddr = InetAddress.getByName(dnsServer)
-            socket.send(java.net.DatagramPacket(query, query.size, serverAddr, 53))
-
-            val response = ByteArray(512)
-            val respPacket = java.net.DatagramPacket(response, response.size)
-            socket.receive(respPacket)
-            socket.close()
-
-            return parseDnsResponse(response, respPacket.length)
-        } catch (e: Exception) {
-            Log.e(TAG, "Mullvad DNS query failed: ${e.message}")
-            return null
-        }
-    }
-
-    private fun buildDnsQuery(txId: Int, hostname: String): ByteArray {
-        val buf = java.io.ByteArrayOutputStream()
-        buf.write(txId shr 8); buf.write(txId and 0xFF) // Transaction ID
-        buf.write(0x01); buf.write(0x00) // Flags: standard query, recursion desired
-        buf.write(0x00); buf.write(0x01) // Questions: 1
-        buf.write(0x00); buf.write(0x00) // Answers: 0
-        buf.write(0x00); buf.write(0x00) // Authority: 0
-        buf.write(0x00); buf.write(0x00) // Additional: 0
-        for (label in hostname.split(".")) {
-            buf.write(label.length)
-            buf.write(label.toByteArray(Charsets.US_ASCII))
-        }
-        buf.write(0x00) // End of name
-        buf.write(0x00); buf.write(0x01) // Type A
-        buf.write(0x00); buf.write(0x01) // Class IN
-        return buf.toByteArray()
-    }
-
-    private fun parseDnsResponse(data: ByteArray, length: Int): InetAddress? {
-        if (length < 12) return null
-        val answerCount = ((data[6].toInt() and 0xFF) shl 8) or (data[7].toInt() and 0xFF)
-        if (answerCount == 0) return null
-
-        // Skip header (12 bytes) and question section
-        var pos = 12
-        while (pos < length && data[pos].toInt() != 0) {
-            val labelLen = data[pos].toInt() and 0xFF
-            if (labelLen >= 0xC0) { pos += 2; break } // Pointer
-            pos += labelLen + 1
-        }
-        if (pos < length && data[pos].toInt() == 0) pos++ // null terminator
-        pos += 4 // skip QTYPE + QCLASS
-
-        // Parse answer records, look for first A record
-        for (i in 0 until answerCount) {
-            if (pos >= length) break
-            // Skip name (may be pointer)
-            if ((data[pos].toInt() and 0xC0) == 0xC0) pos += 2
-            else { while (pos < length && data[pos].toInt() != 0) pos++; pos++ }
-            if (pos + 10 > length) break
-            val type = ((data[pos].toInt() and 0xFF) shl 8) or (data[pos + 1].toInt() and 0xFF)
-            val rdLength = ((data[pos + 8].toInt() and 0xFF) shl 8) or (data[pos + 9].toInt() and 0xFF)
-            pos += 10
-            if (type == 1 && rdLength == 4 && pos + 4 <= length) {
-                return InetAddress.getByAddress(data.copyOfRange(pos, pos + 4))
+        // Also try all registered networks (WiFi, cellular, etc.)
+        connectivityManager.allNetworks.forEach { net ->
+            if (net != active) {
+                val caps = connectivityManager.getNetworkCapabilities(net)
+                val hasInternet = caps?.hasCapability(
+                    NetworkCapabilities.NET_CAPABILITY_INTERNET
+                ) == true
+                if (hasInternet) {
+                    networks.add(net)
+                    Log.d(TAG, "Found alternative network: $net (caps: $caps)")
+                }
             }
-            pos += rdLength
         }
-        return null
+
+        // null = unbound default as last resort
+        networks.add(null)
+        return networks
     }
+
+    // ── Download with retries ──
 
     private fun downloadAndExtract(destFile: File) {
         destFile.delete()
 
+        val networks = getNetworksToTry()
+        Log.i(TAG, "Networks to try: ${networks.map { it?.toString() ?: "default" }}")
+
+        var lastException: Exception? = null
+
+        for (network in networks) {
+            val networkName = network?.toString() ?: "default"
+
+            // Bind process to this network
+            if (network != null) {
+                connectivityManager.bindProcessToNetwork(network)
+            } else {
+                connectivityManager.bindProcessToNetwork(null)
+            }
+            Log.i(TAG, "Trying network: $networkName")
+            post { onProgress("Trying network $networkName...") }
+
+            // Try normal download on this network
+            try {
+                downloadWithRedirects(destFile, useFallbackDns = false, network = network)
+                finishDownload(destFile)
+                return
+            } catch (e: Exception) {
+                lastException = e
+                Log.w(TAG, "Network $networkName failed: ${e.javaClass.simpleName}: ${e.message}")
+                destFile.delete()
+            }
+
+            // Try DoH fallback on this network
+            try {
+                post { onProgress("Trying DoH on network $networkName...") }
+                downloadWithRedirects(destFile, useFallbackDns = true, network = network)
+                finishDownload(destFile)
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "DoH on network $networkName failed: ${e.message}")
+                destFile.delete()
+            }
+        }
+
+        throw lastException ?: RuntimeException("All networks exhausted")
+    }
+
+    private fun finishDownload(destFile: File) {
+        Log.i(TAG, "Download complete: ${destFile.length()} bytes")
+        post { onProgress("Download complete. Extracting...") }
+        extractBootstrap(destFile)
+        post { onComplete(true) }
+    }
+
+    private fun downloadWithRedirects(destFile: File, useFallbackDns: Boolean, network: Network? = null) {
         var url = URL(BOOTSTRAP_URL)
-        var connection: HttpURLConnection
         var redirects = 0
 
-        // Follow redirects manually (HttpURLConnection doesn't follow cross-protocol redirects)
         while (true) {
-            // Resolve hostname with Mullvad DNS fallback
-            val resolved = resolveWithFallback(url.host)
-            val resolvedUrl = URL(url.protocol, resolved.hostAddress, url.port, url.file)
-            connection = resolvedUrl.openConnection() as HttpURLConnection
-            connection.setRequestProperty("Host", url.host)
+            val connection = if (useFallbackDns) {
+                openConnectionWithDoH(url, network)
+            } else {
+                openConnection(url, network)
+            }
+
             connection.instanceFollowRedirects = false
             connection.connectTimeout = 30_000
             connection.readTimeout = 60_000
+            connection.setRequestProperty("User-Agent", "PAI/1.0")
             connection.connect()
 
             val code = connection.responseCode
-            Log.i(TAG, "HTTP $code from ${url.host}${url.path.take(60)}")
+            val mode = if (useFallbackDns) "DoH" else "system"
+            Log.i(TAG, "HTTP $code from ${url.host}${url.path.take(60)} ($mode)")
 
             if (code in 301..303 || code == 307 || code == 308) {
                 val location = connection.getHeaderField("Location")
@@ -176,7 +198,7 @@ class BootstrapInstaller(
                 connection.disconnect()
                 url = URL(location)
                 redirects++
-                if (redirects > 5) throw RuntimeException("Too many redirects")
+                if (redirects > 8) throw RuntimeException("Too many redirects")
                 continue
             }
 
@@ -184,40 +206,154 @@ class BootstrapInstaller(
                 connection.disconnect()
                 throw RuntimeException("HTTP $code from ${url.host}")
             }
-            break
-        }
 
-        val total = connection.contentLength.toLong()
-        Log.i(TAG, "Downloading $total bytes")
+            val total = connection.contentLength.toLong()
+            Log.i(TAG, "Downloading $total bytes")
 
-        BufferedInputStream(connection.inputStream).use { input ->
-            FileOutputStream(destFile).use { output ->
-                val buffer = ByteArray(8192)
-                var downloaded = 0L
-                var lastReport = 0L
-                var len: Int
+            BufferedInputStream(connection.inputStream).use { input ->
+                FileOutputStream(destFile).use { output ->
+                    val buffer = ByteArray(8192)
+                    var downloaded = 0L
+                    var lastReport = 0L
+                    var len: Int
 
-                while (input.read(buffer).also { len = it } != -1) {
-                    output.write(buffer, 0, len)
-                    downloaded += len
+                    while (input.read(buffer).also { len = it } != -1) {
+                        output.write(buffer, 0, len)
+                        downloaded += len
 
-                    if (downloaded - lastReport > 500_000) {
-                        lastReport = downloaded
-                        val pct = if (total > 0) (downloaded * 100 / total).toInt() else 0
-                        val mb = downloaded / (1024 * 1024)
-                        Log.i(TAG, "Downloaded ${mb}MB ($pct%)")
-                        post { onProgress("Downloading... ${mb}MB ($pct%)") }
+                        if (downloaded - lastReport > 500_000) {
+                            lastReport = downloaded
+                            val pct = if (total > 0) (downloaded * 100 / total).toInt() else 0
+                            val mb = downloaded / (1024 * 1024)
+                            Log.i(TAG, "Downloaded ${mb}MB ($pct%)")
+                            post { onProgress("Downloading... ${mb}MB ($pct%)") }
+                        }
                     }
                 }
             }
+            connection.disconnect()
+            break
         }
-        connection.disconnect()
-
-        Log.i(TAG, "Download complete: ${destFile.length()} bytes")
-        post { onProgress("Download complete. Extracting...") }
-        extractBootstrap(destFile)
-        post { onComplete(true) }
     }
+
+    /**
+     * Resolves hostname via DNS-over-HTTPS, then opens HTTPS connection
+     * to the resolved IP with proper SNI and hostname verification.
+     */
+    private fun openConnectionWithDoH(url: URL, network: Network? = null): HttpURLConnection {
+        val originalHost = url.host
+        val resolved = resolveViaDoH(originalHost, network)
+            ?: throw RuntimeException("DoH resolution failed for $originalHost")
+
+        Log.i(TAG, "DoH resolved $originalHost -> ${resolved.hostAddress}")
+
+        val resolvedUrl = URL(url.protocol, resolved.hostAddress, url.port, url.file)
+        val connection = openConnection(resolvedUrl, network)
+        connection.setRequestProperty("Host", originalHost)
+
+        if (connection is HttpsURLConnection) {
+            connection.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, session ->
+                HttpsURLConnection.getDefaultHostnameVerifier().verify(originalHost, session)
+            }
+
+            val baseSf = SSLSocketFactory.getDefault() as SSLSocketFactory
+            connection.sslSocketFactory = object : SSLSocketFactory() {
+                override fun getDefaultCipherSuites() = baseSf.defaultCipherSuites
+                override fun getSupportedCipherSuites() = baseSf.supportedCipherSuites
+
+                override fun createSocket(s: java.net.Socket, host: String, port: Int, autoClose: Boolean): java.net.Socket {
+                    val socket = baseSf.createSocket(s, originalHost, port, autoClose)
+                    if (socket is SSLSocket) {
+                        socket.sslParameters = socket.sslParameters.apply {
+                            serverNames = listOf(SNIHostName(originalHost))
+                        }
+                    }
+                    return socket
+                }
+
+                override fun createSocket(host: String, port: Int) = baseSf.createSocket(host, port)
+                override fun createSocket(host: String, port: Int, localHost: InetAddress, localPort: Int) =
+                    baseSf.createSocket(host, port, localHost, localPort)
+                override fun createSocket(host: InetAddress, port: Int) = baseSf.createSocket(host, port)
+                override fun createSocket(address: InetAddress, port: Int, localAddress: InetAddress, localPort: Int) =
+                    baseSf.createSocket(address, port, localAddress, localPort)
+            }
+        }
+
+        return connection
+    }
+
+    // ── DNS-over-HTTPS (by IP, no DNS needed) ──
+
+    private fun resolveViaDoH(hostname: String, network: Network? = null): InetAddress? {
+        val endpoints = listOf(
+            "$CLOUDFLARE_DOH?name=$hostname&type=A",
+            "$GOOGLE_DOH?name=$hostname&type=A"
+        )
+
+        for (endpoint in endpoints) {
+            try {
+                val result = doHQuery(endpoint, hostname, network)
+                if (result != null) return result
+            } catch (e: Exception) {
+                Log.w(TAG, "DoH endpoint failed: ${e.message}")
+            }
+        }
+        return null
+    }
+
+    private fun doHQuery(endpoint: String, hostname: String, network: Network? = null): InetAddress? {
+        val dohUrl = URL(endpoint)
+        val conn = openConnection(dohUrl, network) as HttpsURLConnection
+        conn.setRequestProperty("Accept", "application/dns-json")
+        conn.connectTimeout = 10_000
+        conn.readTimeout = 10_000
+        conn.connect()
+
+        if (conn.responseCode != 200) {
+            Log.w(TAG, "DoH returned HTTP ${conn.responseCode} from ${dohUrl.host}")
+            conn.disconnect()
+            return null
+        }
+
+        val json = conn.inputStream.bufferedReader().readText()
+        conn.disconnect()
+        Log.d(TAG, "DoH response: ${json.take(200)}")
+
+        // Parse JSON: {"Answer":[{"data":"1.2.3.4","type":1,...},...]}
+        val answerIdx = json.indexOf("\"Answer\"")
+        if (answerIdx < 0) {
+            Log.w(TAG, "DoH response has no Answer section")
+            return null
+        }
+
+        var searchFrom = answerIdx
+        while (true) {
+            val dataIdx = json.indexOf("\"data\"", searchFrom)
+            if (dataIdx < 0) break
+
+            val typeIdx = json.lastIndexOf("\"type\"", dataIdx)
+            if (typeIdx > searchFrom) {
+                val typeValStart = json.indexOf(':', typeIdx) + 1
+                val typeVal = json.substring(typeValStart, minOf(typeValStart + 5, json.length)).trim()
+                if (typeVal.startsWith("1") && (typeVal.length == 1 || !typeVal[1].isDigit())) {
+                    val valStart = json.indexOf('"', json.indexOf(':', dataIdx) + 1) + 1
+                    val valEnd = json.indexOf('"', valStart)
+                    if (valStart > 0 && valEnd > valStart) {
+                        val ip = json.substring(valStart, valEnd)
+                        Log.i(TAG, "DoH resolved $hostname -> $ip (via ${dohUrl.host})")
+                        return InetAddress.getByName(ip)
+                    }
+                }
+            }
+            searchFrom = dataIdx + 6
+        }
+
+        Log.w(TAG, "DoH: no A record found in response")
+        return null
+    }
+
+    // ── Extraction ──
 
     private fun extractBootstrap(zipFile: File) {
         val stagingDir = File("${prefix}_staging")
@@ -235,6 +371,9 @@ class BootstrapInstaller(
                 val content = zipInput.readBytes().toString(Charsets.UTF_8)
                 symlinkLines.addAll(content.lines().filter { it.isNotBlank() })
                 Log.i(TAG, "SYMLINKS.txt: ${symlinkLines.size} lines")
+                if (symlinkLines.isNotEmpty()) {
+                    Log.i(TAG, "SYMLINKS.txt first line: ${symlinkLines[0].take(100)}")
+                }
             } else if (!entry.isDirectory) {
                 val outFile = File(stagingDir, name)
                 outFile.parentFile?.mkdirs()
@@ -260,7 +399,6 @@ class BootstrapInstaller(
         post { onProgress("Setting permissions...") }
         setExecutablePermissions(stagingDir)
 
-        // Atomic swap: rename staging to final prefix
         val prefixDir = File(prefix)
         if (prefixDir.exists()) prefixDir.deleteRecursively()
         if (!stagingDir.renameTo(prefixDir)) {
@@ -273,14 +411,19 @@ class BootstrapInstaller(
 
     private fun createSymlinks(stagingDir: File, lines: List<String>) {
         var symlinkCount = 0
+        var failCount = 0
 
         for (line in lines) {
             val trimmed = line.trim()
             if (trimmed.isEmpty()) continue
 
-            // Format: target←linkpath
+            // Termux SYMLINKS.txt format: target←linkpath (← = U+2190)
             val sepIndex = trimmed.indexOf('←')
-            if (sepIndex < 0) continue
+            if (sepIndex < 0) {
+                Log.w(TAG, "Skipping symlink line (no ← separator): ${trimmed.take(80)}")
+                failCount++
+                continue
+            }
 
             val target = trimmed.substring(0, sepIndex)
             val linkPath = trimmed.substring(sepIndex + 1)
@@ -300,11 +443,12 @@ class BootstrapInstaller(
                     symlinkCount++
                 } catch (_: Exception) {
                     Log.w(TAG, "Failed to create symlink: $linkPath -> $target")
+                    failCount++
                 }
             }
         }
 
-        Log.i(TAG, "Created $symlinkCount symlinks")
+        Log.i(TAG, "Created $symlinkCount symlinks ($failCount failed)")
         post { onProgress("Created $symlinkCount symlinks.") }
     }
 

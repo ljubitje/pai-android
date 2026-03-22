@@ -15,3 +15,5 @@ local.properties
 *.jks
 *.keystore
 .kotlin/
+MEMORY/
+**/build/intermediates/cxx/

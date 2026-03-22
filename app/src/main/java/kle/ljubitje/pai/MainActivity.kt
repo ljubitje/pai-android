@@ -29,6 +29,8 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
     private var session: TerminalSession? = null
     private var pendingPermission = false
     private var bootstrapping = false
+    private var sessionRestartCount = 0
+    private var lastSessionStart = 0L
 
     private val PREFIX: String by lazy {
         applicationContext.filesDir.absolutePath + "/usr"
@@ -138,6 +140,7 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
     }
 
     private fun startTerminalSession() {
+        lastSessionStart = System.currentTimeMillis()
         val shell = findShell()
         val env = arrayOf(
             "HOME=$HOME",
@@ -206,6 +209,18 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
     override fun onTitleChanged(changedSession: TerminalSession) {}
 
     override fun onSessionFinished(finishedSession: TerminalSession) {
+        val now = System.currentTimeMillis()
+        if (now - lastSessionStart < 2000) {
+            sessionRestartCount++
+        } else {
+            sessionRestartCount = 0
+        }
+
+        if (sessionRestartCount > 3) {
+            writeToTerminal("\r\n\u001b[1;31m[PAI] Shell keeps crashing. Check logcat for errors.\u001b[0m\r\n")
+            return
+        }
+
         startTerminalSession()
     }
 
