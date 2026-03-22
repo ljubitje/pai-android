@@ -1,0 +1,2 @@
+/home/ai/projekti/pai-android/terminal-emulator/build/intermediates/cxx/Debug/3i5f5q11/obj/local/arm64-v8a/objs-debug/termux/termux.o: \
+  /home/ai/projekti/pai-android/terminal-emulator/src/main/jni/termux.c
