@@ -1,9 +1,6 @@
 package kle.ljubitje.pai
 
 import android.content.Context
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -22,7 +19,6 @@ import javax.net.ssl.SNIHostName
 
 /**
  * Downloads and extracts the Termux bootstrap archive into $PREFIX.
- * Uses ConnectivityManager for proper network binding (works with VPNs).
  * Falls back to DNS-over-HTTPS if system DNS fails.
  */
 class BootstrapInstaller(
@@ -44,9 +40,6 @@ class BootstrapInstaller(
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val connectivityManager by lazy {
-        context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-    }
 
     fun install() {
         Thread {
@@ -72,96 +65,25 @@ class BootstrapInstaller(
         }.start()
     }
 
-    // ── Network-aware connection opening ──
-
-    /**
-     * Opens a connection bound to a specific network.
-     * On Android with VPNs, unbound sockets may get ECONNREFUSED.
-     */
-    private fun openConnection(url: URL, network: Network? = null): HttpURLConnection {
-        val net = network ?: connectivityManager.activeNetwork
-        if (net != null) {
-            Log.d(TAG, "Opening connection via network: $net")
-            return net.openConnection(url) as HttpURLConnection
-        }
-        Log.d(TAG, "No active network, using default connection")
-        return url.openConnection() as HttpURLConnection
-    }
-
-    /**
-     * Gets all available networks ordered by preference: active first,
-     * then underlying networks (WiFi behind VPN), then all others.
-     */
-    private fun getNetworksToTry(): List<Network?> {
-        val networks = mutableListOf<Network?>()
-        val active = connectivityManager.activeNetwork
-        if (active != null) networks.add(active)
-
-        // Also try all registered networks (WiFi, cellular, etc.)
-        connectivityManager.allNetworks.forEach { net ->
-            if (net != active) {
-                val caps = connectivityManager.getNetworkCapabilities(net)
-                val hasInternet = caps?.hasCapability(
-                    NetworkCapabilities.NET_CAPABILITY_INTERNET
-                ) == true
-                if (hasInternet) {
-                    networks.add(net)
-                    Log.d(TAG, "Found alternative network: $net (caps: $caps)")
-                }
-            }
-        }
-
-        // null = unbound default as last resort
-        networks.add(null)
-        return networks
-    }
-
-    // ── Download with retries ──
+    // ── Download ──
 
     private fun downloadAndExtract(destFile: File) {
         destFile.delete()
 
-        val networks = getNetworksToTry()
-        Log.i(TAG, "Networks to try: ${networks.map { it?.toString() ?: "default" }}")
-
-        var lastException: Exception? = null
-
-        for (network in networks) {
-            val networkName = network?.toString() ?: "default"
-
-            // Bind process to this network
-            if (network != null) {
-                connectivityManager.bindProcessToNetwork(network)
-            } else {
-                connectivityManager.bindProcessToNetwork(null)
-            }
-            Log.i(TAG, "Trying network: $networkName")
-            post { onProgress("Trying network $networkName...") }
-
-            // Try normal download on this network
-            try {
-                downloadWithRedirects(destFile, useFallbackDns = false, network = network)
-                finishDownload(destFile)
-                return
-            } catch (e: Exception) {
-                lastException = e
-                Log.w(TAG, "Network $networkName failed: ${e.javaClass.simpleName}: ${e.message}")
-                destFile.delete()
-            }
-
-            // Try DoH fallback on this network
-            try {
-                post { onProgress("Trying DoH on network $networkName...") }
-                downloadWithRedirects(destFile, useFallbackDns = true, network = network)
-                finishDownload(destFile)
-                return
-            } catch (e: Exception) {
-                Log.w(TAG, "DoH on network $networkName failed: ${e.message}")
-                destFile.delete()
-            }
+        // Try normal download first
+        try {
+            downloadWithRedirects(destFile, useFallbackDns = false)
+            finishDownload(destFile)
+            return
+        } catch (e: Exception) {
+            Log.w(TAG, "Normal download failed: ${e.javaClass.simpleName}: ${e.message}")
+            destFile.delete()
         }
 
-        throw lastException ?: RuntimeException("All networks exhausted")
+        // Fall back to DNS-over-HTTPS
+        post { onProgress("Retrying with DNS-over-HTTPS...") }
+        downloadWithRedirects(destFile, useFallbackDns = true)
+        finishDownload(destFile)
     }
 
     private fun finishDownload(destFile: File) {
@@ -171,15 +93,15 @@ class BootstrapInstaller(
         post { onComplete(true) }
     }
 
-    private fun downloadWithRedirects(destFile: File, useFallbackDns: Boolean, network: Network? = null) {
+    private fun downloadWithRedirects(destFile: File, useFallbackDns: Boolean) {
         var url = URL(BOOTSTRAP_URL)
         var redirects = 0
 
         while (true) {
             val connection = if (useFallbackDns) {
-                openConnectionWithDoH(url, network)
+                openConnectionWithDoH(url)
             } else {
-                openConnection(url, network)
+                url.openConnection() as HttpURLConnection
             }
 
             connection.instanceFollowRedirects = false
@@ -236,19 +158,21 @@ class BootstrapInstaller(
         }
     }
 
+    // ── DNS-over-HTTPS fallback ──
+
     /**
      * Resolves hostname via DNS-over-HTTPS, then opens HTTPS connection
      * to the resolved IP with proper SNI and hostname verification.
      */
-    private fun openConnectionWithDoH(url: URL, network: Network? = null): HttpURLConnection {
+    private fun openConnectionWithDoH(url: URL): HttpURLConnection {
         val originalHost = url.host
-        val resolved = resolveViaDoH(originalHost, network)
+        val resolved = resolveViaDoH(originalHost)
             ?: throw RuntimeException("DoH resolution failed for $originalHost")
 
         Log.i(TAG, "DoH resolved $originalHost -> ${resolved.hostAddress}")
 
         val resolvedUrl = URL(url.protocol, resolved.hostAddress, url.port, url.file)
-        val connection = openConnection(resolvedUrl, network)
+        val connection = resolvedUrl.openConnection() as HttpURLConnection
         connection.setRequestProperty("Host", originalHost)
 
         if (connection is HttpsURLConnection) {
@@ -283,9 +207,7 @@ class BootstrapInstaller(
         return connection
     }
 
-    // ── DNS-over-HTTPS (by IP, no DNS needed) ──
-
-    private fun resolveViaDoH(hostname: String, network: Network? = null): InetAddress? {
+    private fun resolveViaDoH(hostname: String): InetAddress? {
         val endpoints = listOf(
             "$CLOUDFLARE_DOH?name=$hostname&type=A",
             "$GOOGLE_DOH?name=$hostname&type=A"
@@ -293,7 +215,7 @@ class BootstrapInstaller(
 
         for (endpoint in endpoints) {
             try {
-                val result = doHQuery(endpoint, hostname, network)
+                val result = doHQuery(endpoint, hostname)
                 if (result != null) return result
             } catch (e: Exception) {
                 Log.w(TAG, "DoH endpoint failed: ${e.message}")
@@ -302,9 +224,9 @@ class BootstrapInstaller(
         return null
     }
 
-    private fun doHQuery(endpoint: String, hostname: String, network: Network? = null): InetAddress? {
+    private fun doHQuery(endpoint: String, hostname: String): InetAddress? {
         val dohUrl = URL(endpoint)
-        val conn = openConnection(dohUrl, network) as HttpsURLConnection
+        val conn = dohUrl.openConnection() as HttpsURLConnection
         conn.setRequestProperty("Accept", "application/dns-json")
         conn.connectTimeout = 10_000
         conn.readTimeout = 10_000
