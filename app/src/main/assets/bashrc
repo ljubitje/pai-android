@@ -1,0 +1,38 @@
+# PAI Android — user .bashrc
+# Sourced by bash for interactive non-login shells,
+# and by /etc/profile for interactive login shells.
+
+# If not running interactively, don't do anything
+[[ $- != *i* ]] && return
+
+# ── Prompt ──
+PS1='\[\e[1;34m\]pai\[\e[0m\]:\[\e[1;36m\]\w\[\e[0m\]\$ '
+
+# ── History ──
+HISTSIZE=5000
+HISTFILESIZE=10000
+HISTCONTROL=ignoreboth:erasedups
+shopt -s histappend
+
+# ── Shell options ──
+shopt -s checkwinsize
+shopt -s globstar 2>/dev/null
+
+# ── Aliases ──
+alias ls='ls --color=auto'
+alias ll='ls -lah'
+alias la='ls -A'
+alias l='ls -CF'
+alias grep='grep --color=auto'
+alias ..='cd ..'
+alias ...='cd ../..'
+
+# ── pkg shorthand ──
+alias update='pkg update'
+alias upgrade='pkg upgrade'
+alias install='pkg install'
+alias search='pkg search'
+
+# ── PATH ──
+# Add local bin if it exists
+[[ -d "$HOME/.local/bin" ]] && export PATH="$HOME/.local/bin:$PATH"

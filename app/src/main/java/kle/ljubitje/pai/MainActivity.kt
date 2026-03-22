@@ -137,6 +137,20 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         listOf("$PREFIX/bin", "$PREFIX/lib", "$PREFIX/etc", "$PREFIX/tmp").forEach {
             File(it).mkdirs()
         }
+        deployBashrc()
+    }
+
+    /** Deploy .bashrc to HOME if not already present. */
+    private fun deployBashrc() {
+        val bashrc = File(HOME, ".bashrc")
+        if (bashrc.exists()) return
+        try {
+            assets.open("bashrc").bufferedReader().use { reader ->
+                bashrc.writeText(reader.readText())
+            }
+        } catch (_: Exception) {
+            // Asset not found or HOME not writable — non-fatal
+        }
     }
 
     private fun startTerminalSession() {
@@ -151,7 +165,10 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
             "TERMUX_VERSION=PAI",
             "COLORTERM=truecolor",
             "TMPDIR=$PREFIX/tmp",
-            "LD_LIBRARY_PATH=$PREFIX/lib"
+            "LD_LIBRARY_PATH=$PREFIX/lib",
+            "TERMUX_APP_PACKAGE_MANAGER=apt",
+            "ANDROID_DATA=/data",
+            "ANDROID_ROOT=/system"
         )
 
         session = TerminalSession(

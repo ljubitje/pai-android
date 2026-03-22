@@ -318,6 +318,9 @@ class BootstrapInstaller(
         post { onProgress("Extracted $entryCount files. Creating symlinks...") }
         createSymlinks(stagingDir, symlinkLines)
 
+        post { onProgress("Patching paths...") }
+        patchTermuxPaths(stagingDir)
+
         post { onProgress("Setting permissions...") }
         setExecutablePermissions(stagingDir)
 
@@ -329,6 +332,51 @@ class BootstrapInstaller(
 
         Log.i(TAG, "Bootstrap complete: $entryCount files")
         post { onProgress("Bootstrap complete! $entryCount files installed.") }
+    }
+
+    /**
+     * Replaces hardcoded Termux paths in shell scripts and config files
+     * with our app's actual paths, so pkg/apt/profile/etc. work correctly.
+     */
+    private fun patchTermuxPaths(stagingDir: File) {
+        // Use /data/data/ style paths (shorter, works with shebang length limits)
+        val appPkg = context.packageName
+        val appDataDir = "/data/data/$appPkg/files"
+        val termuxFiles = "/data/data/com.termux/files"
+        val termuxCache = "/data/data/com.termux/cache"
+        val appCacheDir = "/data/data/$appPkg/cache"
+
+        // Termux uses /data/data/com.termux/files/home as $HOME but we use external storage
+        val termuxHome = "/data/data/com.termux/files/home"
+        val appHome = "$appDataDir/home"  // patched first, then fixed below
+
+        // Only patch text files in etc/ and bin/ — skip binaries and libraries
+        val patchDirs = listOf("etc", "bin").map { File(stagingDir, it) }
+        var patchCount = 0
+
+        for (dir in patchDirs) {
+            if (!dir.exists()) continue
+            dir.walkTopDown()
+                .filter { it.isFile && !it.name.endsWith(".so") && it.length() < 512_000 }
+                .forEach { file ->
+                    try {
+                        val content = file.readText(Charsets.UTF_8)
+                        if (content.contains(termuxFiles) || content.contains(termuxCache)) {
+                            var patched = content
+                                .replace(termuxCache, appCacheDir)
+                                .replace(termuxFiles, appDataDir)
+                            // Replace hardcoded home dir with $HOME variable reference
+                            patched = patched.replace(appHome, "\$HOME")
+                            file.writeText(patched, Charsets.UTF_8)
+                            patchCount++
+                        }
+                    } catch (_: Exception) {
+                        // Skip binary files that look like text but aren't valid UTF-8
+                    }
+                }
+        }
+
+        Log.i(TAG, "Patched $patchCount files (com.termux -> ${context.packageName})")
     }
 
     private fun createSymlinks(stagingDir: File, lines: List<String>) {
