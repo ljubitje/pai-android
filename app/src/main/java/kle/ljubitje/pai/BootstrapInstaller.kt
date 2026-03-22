@@ -412,8 +412,9 @@ class BootstrapInstaller(
             Dir::Bin::apt-key "$p/bin/apt-key";
             Dir::Log "$p/var/log/apt";
             DPkg::Path "$p/bin:/system/bin:/system/xbin";
-            DPkg::Options:: "--admindir=$p/var/lib/dpkg";
             DPkg::Options:: "--instdir=$p/tmp/dpkg-instdir";
+            DPkg::Options:: "--admindir=$p/tmp/dpkg-instdir/var/lib/dpkg";
+            DPkg::Options:: "--force-script-chrootless";
             DPkg::Options:: "--log=$p/var/log/dpkg.log";
         """.trimIndent() + "\n")
 
@@ -434,38 +435,83 @@ class BootstrapInstaller(
         val statusFile = File("$p/var/lib/dpkg/status")
         if (!statusFile.exists()) statusFile.createNewFile()
 
-        // Mark repos as trusted — apt-key temp file creation uses compiled-in
-        // Termux tmp path we can't override, so skip GPG verification.
-        // HTTPS provides transport security.
-        val sourcesList = File(prefixDir, "etc/apt/sources.list")
-        if (sourcesList.exists()) {
-            val content = sourcesList.readText()
-            if (!content.contains("[trusted=yes]")) {
-                sourcesList.writeText(content.replace(
-                    "deb https://",
-                    "deb [trusted=yes] https://"
-                ))
-            }
-        }
-
         // Create preferences.d directory to suppress warning
         File(prefixDir, "etc/apt/preferences.d").mkdirs()
 
         // Termux .deb packages contain paths like ./data/data/com.termux/files/usr/...
         // Create a symlink-based instdir so dpkg extracts to our prefix:
         //   instdir/data/data/com.termux → /data/data/<our.pkg>
-        val instDir = File(prefixDir, "tmp/dpkg-instdir/data/data")
+        val instBase = File(prefixDir, "tmp/dpkg-instdir")
+        val instDir = File(instBase, "data/data")
         instDir.mkdirs()
         val symlinkTarget = "/data/data/$appPkg"
         val symlinkFile = File(instDir, "com.termux")
-        if (!symlinkFile.exists()) {
-            try {
-                android.system.Os.symlink(symlinkTarget, symlinkFile.absolutePath)
-            } catch (e: Exception) {
-                Runtime.getRuntime().exec(
-                    arrayOf("ln", "-sf", symlinkTarget, symlinkFile.absolutePath)
-                ).waitFor()
-            }
+        if (!symlinkFile.exists()) createSymlink(symlinkTarget, symlinkFile.absolutePath)
+
+        // dpkg requires admindir inside instdir — create symlink inside instdir
+        val instVarLib = File(instBase, "var/lib")
+        instVarLib.mkdirs()
+        val adminSymlink = File(instVarLib, "dpkg")
+        if (!adminSymlink.exists()) createSymlink("$p/var/lib/dpkg", adminSymlink.absolutePath)
+
+        // Wrap apt to ensure [trusted=yes] in sources.list before every invocation.
+        // Termux apt-key uses compiled-in tmp path we can't write to, so GPG
+        // verification always fails. pkg rewrites sources.list without [trusted=yes],
+        // so this wrapper re-adds it every time.
+        val aptBin = File(prefixDir, "bin/apt")
+        val aptReal = File(prefixDir, "bin/apt.bin")
+        if (aptBin.exists() && !aptReal.exists()) {
+            aptBin.renameTo(aptReal)
+            aptBin.writeText("""
+                #!/data/data/$appPkg/files/usr/bin/sh
+                sed -i '/^deb / { /\[trusted=yes\]/! s/^deb /deb [trusted=yes] / }' "$p/etc/apt/sources.list" 2>/dev/null
+                exec "$p/bin/apt.bin" "${'$'}@"
+            """.trimIndent() + "\n")
+            aptBin.setExecutable(true, false)
+        }
+
+        // Also wrap apt-get (pkg and some scripts use it)
+        val aptGetBin = File(prefixDir, "bin/apt-get")
+        val aptGetReal = File(prefixDir, "bin/apt-get.bin")
+        if (aptGetBin.exists() && !aptGetReal.exists()) {
+            aptGetBin.renameTo(aptGetReal)
+            aptGetBin.writeText("""
+                #!/data/data/$appPkg/files/usr/bin/sh
+                sed -i '/^deb / { /\[trusted=yes\]/! s/^deb /deb [trusted=yes] / }' "$p/etc/apt/sources.list" 2>/dev/null
+                exec "$p/bin/apt-get.bin" "${'$'}@"
+            """.trimIndent() + "\n")
+            aptGetBin.setExecutable(true, false)
+        }
+
+        // dpkg reads $HOME/.dpkg.cfg — create internal home with config
+        // so dpkg doesn't try to read from external storage (FUSE permission issues)
+        val internalHome = "/data/data/$appPkg/files/home"
+        File(internalHome).mkdirs()
+        File("$internalHome/.dpkg.cfg").writeText("# dpkg user config\n")
+
+        // Wrap dpkg to:
+        // 1. Use internal home for .dpkg.cfg
+        // 2. Patch shebangs in .deb postinst scripts (they reference Termux paths)
+        val dpkgBin = File(prefixDir, "bin/dpkg")
+        val dpkgReal = File(prefixDir, "bin/dpkg.bin")
+        if (dpkgBin.exists() && !dpkgReal.exists()) {
+            dpkgBin.renameTo(dpkgReal)
+            val infoDir = "$p/var/lib/dpkg/info"
+            dpkgBin.writeText("""
+                #!/data/data/$appPkg/files/usr/bin/sh
+                # Patch Termux shebangs in dpkg scripts (from previous operations)
+                for f in $infoDir/*.postinst $infoDir/*.preinst $infoDir/*.prerm $infoDir/*.postrm; do
+                    [ -f "${'$'}f" ] && sed -i 's|/data/data/com.termux|/data/data/$appPkg|g' "${'$'}f" 2>/dev/null
+                done
+                HOME=$internalHome "$p/bin/dpkg.bin" "${'$'}@"
+                ret=${'$'}?
+                # Patch shebangs in newly extracted scripts (for next operation)
+                for f in $infoDir/*.postinst $infoDir/*.preinst $infoDir/*.prerm $infoDir/*.postrm; do
+                    [ -f "${'$'}f" ] && sed -i 's|/data/data/com.termux|/data/data/$appPkg|g' "${'$'}f" 2>/dev/null
+                done
+                exit ${'$'}ret
+            """.trimIndent() + "\n")
+            dpkgBin.setExecutable(true, false)
         }
 
         Log.i(TAG, "Created apt.conf redirecting to $p")
@@ -528,6 +574,14 @@ class BootstrapInstaller(
         }
         dir.walkTopDown().filter { it.name.endsWith(".so") || it.name.contains(".so.") }.forEach {
             it.setExecutable(true, false)
+        }
+    }
+
+    private fun createSymlink(target: String, linkPath: String) {
+        try {
+            android.system.Os.symlink(target, linkPath)
+        } catch (e: Exception) {
+            Runtime.getRuntime().exec(arrayOf("ln", "-sf", target, linkPath)).waitFor()
         }
     }
 

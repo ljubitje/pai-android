@@ -1,0 +1,10 @@
+# PAI Android — user .profile
+# Sourced by bash for login shells when /etc/profile is not found.
+
+# Source system profile if it exists at our prefix
+if [ -n "$PREFIX" ] && [ -r "$PREFIX/etc/profile" ]; then
+    . "$PREFIX/etc/profile"
+elif [ -r "$HOME/.bashrc" ]; then
+    # Fallback: source .bashrc directly
+    . "$HOME/.bashrc"
+fi

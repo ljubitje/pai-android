@@ -137,19 +137,21 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         listOf("$PREFIX/bin", "$PREFIX/lib", "$PREFIX/etc", "$PREFIX/tmp").forEach {
             File(it).mkdirs()
         }
-        deployBashrc()
+        deployShellConfigs()
     }
 
-    /** Deploy .bashrc to HOME if not already present. */
-    private fun deployBashrc() {
-        val bashrc = File(HOME, ".bashrc")
-        if (bashrc.exists()) return
-        try {
-            assets.open("bashrc").bufferedReader().use { reader ->
-                bashrc.writeText(reader.readText())
+    /** Deploy shell config files to HOME if not already present. */
+    private fun deployShellConfigs() {
+        mapOf("bashrc" to ".bashrc", "profile" to ".profile").forEach { (asset, filename) ->
+            val dest = File(HOME, filename)
+            if (dest.exists()) return@forEach
+            try {
+                assets.open(asset).bufferedReader().use { reader ->
+                    dest.writeText(reader.readText())
+                }
+            } catch (_: Exception) {
+                // Asset not found or HOME not writable — non-fatal
             }
-        } catch (_: Exception) {
-            // Asset not found or HOME not writable — non-fatal
         }
     }
 
@@ -169,7 +171,9 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
             "TERMUX_APP_PACKAGE_MANAGER=apt",
             "ANDROID_DATA=/data",
             "ANDROID_ROOT=/system",
-            "APT_CONFIG=$PREFIX/etc/apt/apt.conf"
+            "APT_CONFIG=$PREFIX/etc/apt/apt.conf",
+            "CURL_CA_BUNDLE=$PREFIX/etc/tls/cert.pem",
+            "SSL_CERT_FILE=$PREFIX/etc/tls/cert.pem"
         )
 
         session = TerminalSession(
