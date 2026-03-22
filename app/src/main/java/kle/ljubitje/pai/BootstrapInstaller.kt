@@ -50,6 +50,7 @@ class BootstrapInstaller(
                     Log.i(TAG, "Using bundled bootstrap from assets (${assetZip.length()} bytes)")
                     post { onProgress("Extracting bundled bootstrap...") }
                     extractBootstrap(assetZip)
+                    createFirstRunUpdate()
                     post { onComplete(true) }
                     return@Thread
                 }
@@ -558,6 +559,29 @@ class BootstrapInstaller(
         }
 
         Log.i(TAG, "Created apt.conf redirecting to $p")
+    }
+
+    /**
+     * Creates a first-run script that updates bundled packages.
+     * The script is sourced by .bashrc on first login, then deletes itself.
+     */
+    /**
+     * Creates a first-run script in profile.d/ that updates bundled packages.
+     * Sourced by $PREFIX/etc/profile on first login, then deletes itself.
+     */
+    private fun createFirstRunUpdate() {
+        val appPkg = context.packageName
+        val p = "/data/data/$appPkg/files/usr"
+        val profileDir = File("$p/etc/profile.d")
+        profileDir.mkdirs()
+        val script = File(profileDir, "pai-first-run.sh")
+        script.writeText("""
+            echo -e "\033[1;36m[PAI] Updating bundled packages...\033[0m"
+            apt update -y 2>&1 && apt upgrade -y 2>&1
+            echo -e "\033[1;32m[PAI] Packages up to date.\033[0m"
+            rm -f "$p/etc/profile.d/pai-first-run.sh"
+        """.trimIndent() + "\n")
+        Log.i(TAG, "Created first-run update script in profile.d/")
     }
 
     private fun createSymlinks(stagingDir: File, lines: List<String>) {
