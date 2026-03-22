@@ -168,7 +168,8 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
             "LD_LIBRARY_PATH=$PREFIX/lib",
             "TERMUX_APP_PACKAGE_MANAGER=apt",
             "ANDROID_DATA=/data",
-            "ANDROID_ROOT=/system"
+            "ANDROID_ROOT=/system",
+            "APT_CONFIG=$PREFIX/etc/apt/apt.conf"
         )
 
         session = TerminalSession(

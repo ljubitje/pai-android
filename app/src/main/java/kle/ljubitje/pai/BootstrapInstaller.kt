@@ -330,6 +330,9 @@ class BootstrapInstaller(
             throw RuntimeException("Failed to rename staging to prefix")
         }
 
+        post { onProgress("Configuring package manager...") }
+        createAptConfig(prefixDir)
+
         Log.i(TAG, "Bootstrap complete: $entryCount files")
         post { onProgress("Bootstrap complete! $entryCount files installed.") }
     }
@@ -360,6 +363,12 @@ class BootstrapInstaller(
                 .filter { it.isFile && !it.name.endsWith(".so") && it.length() < 512_000 }
                 .forEach { file ->
                     try {
+                        // Skip ELF binaries — reading them as UTF-8 corrupts binary data
+                        val header = ByteArray(4)
+                        file.inputStream().use { it.read(header) }
+                        if (header[0] == 0x7F.toByte() && header[1] == 0x45.toByte() &&
+                            header[2] == 0x4C.toByte() && header[3] == 0x46.toByte()) return@forEach
+
                         val content = file.readText(Charsets.UTF_8)
                         if (content.contains(termuxFiles) || content.contains(termuxCache)) {
                             var patched = content
@@ -371,12 +380,95 @@ class BootstrapInstaller(
                             patchCount++
                         }
                     } catch (_: Exception) {
-                        // Skip binary files that look like text but aren't valid UTF-8
+                        // Skip files that aren't valid UTF-8
                     }
                 }
         }
 
         Log.i(TAG, "Patched $patchCount files (com.termux -> ${context.packageName})")
+    }
+
+    /**
+     * Creates apt.conf that redirects all apt paths from the compiled-in
+     * Termux prefix to our app's actual prefix. Needed because Termux-compiled
+     * apt/dpkg binaries have /data/data/com.termux/files/usr baked in.
+     */
+    private fun createAptConfig(prefixDir: File) {
+        val appPkg = context.packageName
+        val p = "/data/data/$appPkg/files/usr"
+        val cacheDir = "/data/data/$appPkg/cache/apt"
+
+        val aptConf = File(prefixDir, "etc/apt/apt.conf")
+        aptConf.writeText("""
+            Dir "$p";
+            Dir::State "$p/var/lib/apt";
+            Dir::State::status "$p/var/lib/dpkg/status";
+            Dir::Cache "$cacheDir";
+            Dir::Etc "$p/etc/apt";
+            Dir::Etc::TrustedParts "$p/etc/apt/trusted.gpg.d";
+            Dir::Bin::DPkg "$p/bin/dpkg";
+            Dir::Bin::methods "$p/lib/apt/methods";
+            Acquire::https::CaInfo "$p/etc/tls/cert.pem";
+            Dir::Bin::apt-key "$p/bin/apt-key";
+            Dir::Log "$p/var/log/apt";
+            DPkg::Path "$p/bin:/system/bin:/system/xbin";
+            DPkg::Options:: "--admindir=$p/var/lib/dpkg";
+            DPkg::Options:: "--instdir=$p/tmp/dpkg-instdir";
+            DPkg::Options:: "--log=$p/var/log/dpkg.log";
+        """.trimIndent() + "\n")
+
+        // Ensure required directories exist
+        listOf(
+            "$p/var/lib/apt/lists/partial",
+            "$p/var/lib/dpkg/info",
+            "$p/var/lib/dpkg/updates",
+            "$p/var/log",
+            "$p/var/log/apt",
+            "$p/etc/apt/apt.conf.d",
+            "$p/tmp",
+            cacheDir,
+            "$cacheDir/archives/partial"
+        ).forEach { File(it).mkdirs() }
+
+        // Create dpkg status file if missing
+        val statusFile = File("$p/var/lib/dpkg/status")
+        if (!statusFile.exists()) statusFile.createNewFile()
+
+        // Mark repos as trusted — apt-key temp file creation uses compiled-in
+        // Termux tmp path we can't override, so skip GPG verification.
+        // HTTPS provides transport security.
+        val sourcesList = File(prefixDir, "etc/apt/sources.list")
+        if (sourcesList.exists()) {
+            val content = sourcesList.readText()
+            if (!content.contains("[trusted=yes]")) {
+                sourcesList.writeText(content.replace(
+                    "deb https://",
+                    "deb [trusted=yes] https://"
+                ))
+            }
+        }
+
+        // Create preferences.d directory to suppress warning
+        File(prefixDir, "etc/apt/preferences.d").mkdirs()
+
+        // Termux .deb packages contain paths like ./data/data/com.termux/files/usr/...
+        // Create a symlink-based instdir so dpkg extracts to our prefix:
+        //   instdir/data/data/com.termux → /data/data/<our.pkg>
+        val instDir = File(prefixDir, "tmp/dpkg-instdir/data/data")
+        instDir.mkdirs()
+        val symlinkTarget = "/data/data/$appPkg"
+        val symlinkFile = File(instDir, "com.termux")
+        if (!symlinkFile.exists()) {
+            try {
+                android.system.Os.symlink(symlinkTarget, symlinkFile.absolutePath)
+            } catch (e: Exception) {
+                Runtime.getRuntime().exec(
+                    arrayOf("ln", "-sf", symlinkTarget, symlinkFile.absolutePath)
+                ).waitFor()
+            }
+        }
+
+        Log.i(TAG, "Created apt.conf redirecting to $p")
     }
 
     private fun createSymlinks(stagingDir: File, lines: List<String>) {
