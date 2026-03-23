@@ -69,8 +69,17 @@ success "Node.js: $(node --version)"
 if ! command -v tsx &>/dev/null; then
     info "Installing tsx (TypeScript runner)..."
     npm install -g tsx 2>&1
+    termux-fix-shebang "$PREFIX/bin/tsx" 2>/dev/null
 fi
 success "tsx ready"
+
+# ── Install Claude Code if needed ──
+if ! command -v claude &>/dev/null; then
+    info "Installing Claude Code..."
+    npm install -g @anthropic-ai/claude-code 2>&1
+    termux-fix-shebang "$PREFIX/bin/claude" 2>/dev/null
+fi
+success "Claude Code: $(claude --version 2>&1)"
 
 # ── Clone PAI repository (sparse — .claude directory only) ──
 PAI_REPO="$TMPDIR/pai-repo"
