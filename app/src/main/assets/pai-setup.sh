@@ -56,7 +56,7 @@ mkdir -p "$TMPDIR"
 # ── Install Node.js if needed (Bun binary doesn't run on Android/Bionic) ──
 if ! command -v node &>/dev/null; then
     info "Installing Node.js..."
-    pkg install -y nodejs-lts 2>&1
+    apt install -y nodejs-lts 2>&1
 fi
 
 if ! command -v node &>/dev/null; then
