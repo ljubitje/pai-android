@@ -131,6 +131,7 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
             onComplete = { success ->
                 bootstrapping = false
                 if (success) {
+                    deployPaiSetup()
                     writeToTerminal("\r\n\u001b[1;32m[PAI] Bootstrap complete! Restarting shell with bash...\u001b[0m\r\n")
                     terminalView.postDelayed({
                         restartWithBash()
@@ -269,18 +270,18 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
             }
         }
 
-        // PAI setup script — deploy to $PREFIX/bin/ where execute permission works
+        deployPaiSetup()
+    }
+
+    /** Deploy pai-setup script to $PREFIX/bin/. Called after bootstrap and on each app start. */
+    private fun deployPaiSetup() {
         try {
             val setupDest = File("$PREFIX/bin", "pai-setup")
             if (!setupDest.exists()) {
                 val content = assets.open("pai-setup.sh").bufferedReader().use { it.readText() }
-                // Patch paths using dynamic package name (same approach as BootstrapInstaller)
-                val patched = content.replace(
-                    "/data/data/kle.ljubitje.pai/files/usr",
-                    PREFIX
-                )
-                setupDest.writeText(patched)
+                setupDest.writeText(content)
                 setupDest.setExecutable(true, false)
+                Log.i("MainActivity", "pai-setup deployed: ${setupDest.length()} bytes")
             }
         } catch (e: Exception) {
             Log.w("MainActivity", "Failed to deploy pai-setup: ${e.message}")
