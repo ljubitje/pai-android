@@ -61,6 +61,7 @@ class BootstrapInstaller(
                     Log.i(TAG, "Found local bootstrap: ${localFile.absolutePath} (${localFile.length()} bytes)")
                     post { onProgress("Found bootstrap archive. Extracting...") }
                     extractBootstrap(localFile)
+                    createFirstRunUpdate()
                     post { onComplete(true) }
                     return@Thread
                 }
@@ -134,6 +135,7 @@ class BootstrapInstaller(
         Log.i(TAG, "Download complete: ${destFile.length()} bytes")
         post { onProgress("Download complete. Extracting...") }
         extractBootstrap(destFile)
+        createFirstRunUpdate()
         post { onComplete(true) }
     }
 
@@ -540,6 +542,9 @@ class BootstrapInstaller(
         val dpkgReal = File(prefixDir, "bin/dpkg.bin")
         if (dpkgBin.exists() && !dpkgReal.exists()) {
             dpkgBin.renameTo(dpkgReal)
+        }
+        // Always rewrite wrapper (may have been updated with proot support)
+        if (dpkgReal.exists()) {
             val infoDir = "$p/var/lib/dpkg/info"
             dpkgBin.writeText("""
                 #!/data/data/$appPkg/files/usr/bin/sh
@@ -547,9 +552,15 @@ class BootstrapInstaller(
                 for f in $infoDir/*.postinst $infoDir/*.preinst $infoDir/*.prerm $infoDir/*.postrm; do
                     [ -f "${'$'}f" ] && sed -i 's|/data/data/com.termux|/data/data/$appPkg|g' "${'$'}f" 2>/dev/null
                 done
-                HOME=$internalHome "$p/bin/dpkg.bin" "${'$'}@"
+                # Use proot to remap /data/data/com.termux → /data/data/$appPkg
+                # This fixes shebangs in preinst/postinst scripts extracted by dpkg to tmp.ci/
+                if [ -x "$p/bin/proot" ]; then
+                    HOME=$internalHome "$p/bin/proot" -b "/data/data/$appPkg:/data/data/com.termux" "$p/bin/dpkg.bin" "${'$'}@"
+                else
+                    HOME=$internalHome "$p/bin/dpkg.bin" "${'$'}@"
+                fi
                 ret=${'$'}?
-                # Patch shebangs in newly extracted scripts (for next operation)
+                # Patch shebangs in newly extracted scripts (for next operation without proot)
                 for f in $infoDir/*.postinst $infoDir/*.preinst $infoDir/*.prerm $infoDir/*.postrm; do
                     [ -f "${'$'}f" ] && sed -i 's|/data/data/com.termux|/data/data/$appPkg|g' "${'$'}f" 2>/dev/null
                 done
@@ -589,7 +600,9 @@ class BootstrapInstaller(
             rm -f "$p/etc/profile.d/pai-first-run.sh"
             echo -e "\033[1;36m[PAI] Updating bundled packages...\033[0m"
             apt update -y 2>&1 && apt upgrade -y 2>&1
-            echo -e "\033[1;32m[PAI] Packages up to date.\033[0m"
+            echo -e "\033[1;36m[PAI] Installing PAI prerequisites...\033[0m"
+            apt install -y git proot 2>&1
+            echo -e "\033[1;32m[PAI] Ready. Run 'pai-setup' to install PAI.\033[0m"
         """.trimIndent() + "\n")
         Log.i(TAG, "Created first-run update script in profile.d/")
     }

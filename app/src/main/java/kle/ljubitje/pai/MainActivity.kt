@@ -1,12 +1,15 @@
 package kle.ljubitje.pai
 
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
+import android.util.Log
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
@@ -32,6 +35,13 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
     private var sessionRestartCount = 0
     private var lastSessionStart = 0L
 
+    private val commandReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val cmd = intent?.getStringExtra("cmd") ?: return
+            session?.write(cmd + "\n")
+        }
+    }
+
     private val PREFIX: String by lazy {
         applicationContext.filesDir.absolutePath + "/usr"
     }
@@ -44,6 +54,13 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         super.onCreate(savedInstanceState)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        val filter = IntentFilter("kle.ljubitje.pai.RUN_COMMAND")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(commandReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(commandReceiver, filter)
+        }
 
         setupFilesystem()
 
@@ -76,6 +93,11 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         } else {
             initTerminal()
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(commandReceiver)
     }
 
     override fun onResume() {
@@ -144,23 +166,41 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         deployShellConfigs()
     }
 
-    /** Deploy shell config files to HOME, updating stale versions. */
+    /** Deploy shell config files and PAI setup script to HOME, updating stale versions. */
     private fun deployShellConfigs() {
+        // Versioned files — only overwrite if bundled version is newer
         mapOf("bashrc" to ".bashrc", "profile" to ".profile").forEach { (asset, filename) ->
             val dest = File(HOME, filename)
             try {
                 val bundled = assets.open(asset).bufferedReader().use { it.readText() }
                 if (dest.exists()) {
-                    // Extract version from first line: "# PAI Android — user .bashrc (v2)"
+                    // Extract version from first line: "# PAI Android — user .bashrc (v3)"
                     val bundledVersion = Regex("""\(v(\d+)\)""").find(bundled.lineSequence().first())?.groupValues?.get(1) ?: return@forEach
                     val existingFirst = dest.readText().lineSequence().first()
                     val existingVersion = Regex("""\(v(\d+)\)""").find(existingFirst)?.groupValues?.get(1) ?: "0"
                     if (existingVersion.toInt() >= bundledVersion.toInt()) return@forEach
                 }
                 dest.writeText(bundled)
-            } catch (_: Exception) {
-                // Asset not found or HOME not writable — non-fatal
+            } catch (e: Exception) {
+                Log.w("MainActivity", "Failed to deploy $filename: ${e.message}")
             }
+        }
+
+        // PAI setup script — deploy to $PREFIX/bin/ where execute permission works
+        try {
+            val setupDest = File("$PREFIX/bin", "pai-setup")
+            if (!setupDest.exists()) {
+                val content = assets.open("pai-setup.sh").bufferedReader().use { it.readText() }
+                // Patch paths using dynamic package name (same approach as BootstrapInstaller)
+                val patched = content.replace(
+                    "/data/data/kle.ljubitje.pai/files/usr",
+                    PREFIX
+                )
+                setupDest.writeText(patched)
+                setupDest.setExecutable(true, false)
+            }
+        } catch (e: Exception) {
+            Log.w("MainActivity", "Failed to deploy pai-setup: ${e.message}")
         }
     }
 
@@ -172,7 +212,8 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
             "PREFIX=$PREFIX",
             "TERM=xterm-256color",
             "LANG=en_US.UTF-8",
-            "PATH=$PREFIX/bin:/system/bin:/system/xbin",
+            "BUN_INSTALL=$PREFIX/bun",
+            "PATH=$PREFIX/bun/bin:$PREFIX/bin:/system/bin:/system/xbin",
             "TERMUX_VERSION=PAI",
             "COLORTERM=truecolor",
             "TMPDIR=$PREFIX/tmp",
@@ -182,7 +223,10 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
             "ANDROID_ROOT=/system",
             "APT_CONFIG=$PREFIX/etc/apt/apt.conf",
             "CURL_CA_BUNDLE=$PREFIX/etc/tls/cert.pem",
-            "SSL_CERT_FILE=$PREFIX/etc/tls/cert.pem"
+            "SSL_CERT_FILE=$PREFIX/etc/tls/cert.pem",
+            "GIT_EXEC_PATH=$PREFIX/libexec/git-core",
+            "GIT_TEMPLATE_DIR=$PREFIX/share/git-core/templates",
+            "GIT_SSL_CAINFO=$PREFIX/etc/tls/cert.pem"
         )
 
         session = TerminalSession(
