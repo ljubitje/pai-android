@@ -60,32 +60,45 @@ class ExtraKeysView(
             setTextColor(Color.WHITE)
             setHintTextColor(Color.parseColor("#666666"))
             hint = "Type here..."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
             setBackgroundDrawable(GradientDrawable().apply {
                 setColor(Color.parseColor("#2a2a2a"))
-                cornerRadius = dp(8).toFloat()
-                setStroke(1, Color.parseColor("#444444"))
+                cornerRadius = dp(10).toFloat()
+                setStroke(1, Color.parseColor("#555555"))
             })
-            setPadding(dp(10), dp(6), dp(10), dp(6))
-            minHeight = dp(36)
-            minimumHeight = dp(36)
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            minHeight = dp(42)
+            minimumHeight = dp(42)
             maxLines = 4
             // Allow multiline input — Enter = newline, not submit
             inputType = InputType.TYPE_CLASS_TEXT or
                 InputType.TYPE_TEXT_FLAG_MULTI_LINE
             imeOptions = EditorInfo.IME_FLAG_NO_ENTER_ACTION
             isSingleLine = false
+
+            // When field is empty, Enter sends newline to terminal (accept defaults)
+            setOnKeyListener { _, keyCode, event ->
+                if (keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN) {
+                    if (text.isNullOrEmpty()) {
+                        val session = terminalView.currentSession ?: return@setOnKeyListener false
+                        session.write("\n")
+                        true
+                    } else false
+                } else false
+            }
         }
         inputRow.addView(inputField, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
             marginEnd = dp(4)
         })
 
         val sendBtn = createButton("\u25B6") {  // ▶
+            val session = terminalView.currentSession ?: return@createButton
             val text = inputField.text.toString()
             if (text.isNotEmpty()) {
-                val session = terminalView.currentSession ?: return@createButton
                 session.write(text + "\n")
                 inputField.text.clear()
+            } else {
+                session.write("\n")
             }
         }
         inputRow.addView(sendBtn)
@@ -101,23 +114,28 @@ class ExtraKeysView(
     private fun createButton(label: String, action: () -> Unit): Button {
         return Button(context).apply {
             text = label
-            setTextColor(Color.parseColor("#cccccc"))
-            setBackgroundColor(Color.parseColor("#333333"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            minWidth = dp(44)
-            minimumWidth = dp(44)
-            minHeight = dp(36)
-            minimumHeight = dp(36)
-            setPadding(dp(10), dp(2), dp(10), dp(2))
+            setTextColor(Color.parseColor("#e0e0e0"))
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#383838"))
+                cornerRadius = dp(8).toFloat()
+                setStroke(1, Color.parseColor("#4a4a4a"))
+            }
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+            minWidth = dp(50)
+            minimumWidth = dp(50)
+            minHeight = dp(42)
+            minimumHeight = dp(42)
+            setPadding(dp(12), dp(4), dp(12), dp(4))
             isAllCaps = false
             gravity = Gravity.CENTER
+            stateListAnimator = null  // remove default elevation/shadow
 
             val params = LayoutParams(
                 LayoutParams.WRAP_CONTENT,
-                dp(36)
+                dp(42)
             ).apply {
-                marginStart = dp(2)
-                marginEnd = dp(2)
+                marginStart = dp(3)
+                marginEnd = dp(3)
             }
             layoutParams = params
 

@@ -7,12 +7,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Color
-import android.net.Uri
 import android.os.Build
 import android.util.Log
 import android.os.Bundle
 import android.os.Environment
-import android.provider.Settings
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.WindowManager
@@ -28,12 +26,15 @@ import java.io.File
 
 class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionClient {
 
+    companion object {
+        const val EXTRA_RUN_COMMAND = "run_command"
+    }
+
     private lateinit var terminalView: TerminalView
     private var session: TerminalSession? = null
-    private var pendingPermission = false
-    private var bootstrapping = false
     private var sessionRestartCount = 0
     private var lastSessionStart = 0L
+    private var pendingCommand: String? = null
 
     private val commandReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -62,6 +63,9 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
             registerReceiver(commandReceiver, filter)
         }
 
+        // Check for command to run after terminal starts
+        pendingCommand = intent?.getStringExtra(EXTRA_RUN_COMMAND)
+
         setupFilesystem()
 
         terminalView = TerminalView(this, null)
@@ -76,7 +80,7 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         layout.addView(terminalView, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             0,
-            1f // weight=1 takes remaining space
+            1f
         ))
         layout.addView(extraKeysView, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -84,80 +88,12 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         ))
         setContentView(layout)
 
-        // Request all-files access if not granted — defer terminal start until onResume
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
-            pendingPermission = true
-            val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-            intent.data = Uri.parse("package:$packageName")
-            startActivity(intent)
-        } else {
-            initTerminal()
-        }
+        startTerminalSession()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         unregisterReceiver(commandReceiver)
-    }
-
-    override fun onResume() {
-        super.onResume()
-        if (pendingPermission) {
-            pendingPermission = false
-            initTerminal()
-        }
-    }
-
-    private fun initTerminal() {
-        if (BootstrapInstaller.isBootstrapped(PREFIX)) {
-            startTerminalSession()
-        } else {
-            // Start a basic shell first so the user sees progress output
-            startTerminalSession()
-            runBootstrap()
-        }
-    }
-
-    private fun runBootstrap() {
-        if (bootstrapping) return
-        bootstrapping = true
-
-        BootstrapInstaller(
-            context = applicationContext,
-            prefix = PREFIX,
-            onProgress = { message ->
-                writeToTerminal("\r\n\u001b[1;36m[PAI] $message\u001b[0m\r\n")
-            },
-            onComplete = { success ->
-                bootstrapping = false
-                if (success) {
-                    deployPaiSetup()
-                    writeToTerminal("\r\n\u001b[1;32m[PAI] Bootstrap complete! Restarting shell with bash...\u001b[0m\r\n")
-                    terminalView.postDelayed({
-                        restartWithBash()
-                    }, 1500)
-                } else {
-                    writeToTerminal("\r\n\u001b[1;31m[PAI] Bootstrap failed. Check your internet connection and restart the app.\u001b[0m\r\n")
-                }
-            }
-        ).install()
-    }
-
-    private fun restartWithBash() {
-        // Temporarily remove session finished listener to prevent
-        // onSessionFinished from also starting a new session
-        val oldSession = session
-        session = null
-        oldSession?.finishIfRunning()
-        startTerminalSession()
-    }
-
-    /** Write text directly to the terminal display (not through the shell). */
-    private fun writeToTerminal(text: String) {
-        val emulator = session?.emulator ?: return
-        val bytes = text.toByteArray(Charsets.UTF_8)
-        emulator.append(bytes, bytes.size)
-        terminalView.onScreenUpdated()
     }
 
     private fun setupFilesystem() {
@@ -250,15 +186,13 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         }
     }
 
-    /** Deploy shell config files and PAI setup script to HOME, updating stale versions. */
+    /** Deploy shell config files to HOME, updating stale versions. */
     private fun deployShellConfigs() {
-        // Versioned files — only overwrite if bundled version is newer
         mapOf("bashrc" to ".bashrc", "profile" to ".profile").forEach { (asset, filename) ->
             val dest = File(HOME, filename)
             try {
                 val bundled = assets.open(asset).bufferedReader().use { it.readText() }
                 if (dest.exists()) {
-                    // Extract version from first line: "# PAI Android — user .bashrc (v3)"
                     val bundledVersion = Regex("""\(v(\d+)\)""").find(bundled.lineSequence().first())?.groupValues?.get(1) ?: return@forEach
                     val existingFirst = dest.readText().lineSequence().first()
                     val existingVersion = Regex("""\(v(\d+)\)""").find(existingFirst)?.groupValues?.get(1) ?: "0"
@@ -273,7 +207,7 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         deployPaiSetup()
     }
 
-    /** Deploy pai-setup script to $PREFIX/bin/. Called after bootstrap and on each app start. */
+    /** Deploy pai-setup script to $PREFIX/bin/. */
     private fun deployPaiSetup() {
         try {
             val setupDest = File("$PREFIX/bin", "pai-setup")
@@ -324,6 +258,15 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
 
         terminalView.attachSession(session)
         terminalView.setTerminalViewClient(this)
+
+        // Run pending command after shell starts
+        if (pendingCommand != null) {
+            val cmd = pendingCommand
+            pendingCommand = null
+            terminalView.postDelayed({
+                session?.write("$cmd\n")
+            }, 1000)
+        }
     }
 
     private fun findShell(): String {
@@ -368,7 +311,6 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
     override fun onTitleChanged(changedSession: TerminalSession) {}
 
     override fun onSessionFinished(finishedSession: TerminalSession) {
-        // Skip if session was cleared by restartWithBash() to prevent double-start
         if (session == null || finishedSession !== session) return
 
         val now = System.currentTimeMillis()
@@ -379,7 +321,6 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         }
 
         if (sessionRestartCount > 3) {
-            writeToTerminal("\r\n\u001b[1;31m[PAI] Shell keeps crashing. Check logcat for errors.\u001b[0m\r\n")
             return
         }
 
@@ -405,7 +346,7 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
     override fun onTerminalCursorStateChange(state: Boolean) {}
     override fun getTerminalCursorStyle(): Int = TerminalEmulator.DEFAULT_TERMINAL_CURSOR_STYLE
 
-    // ── Logging (shared by both interfaces) ──
+    // ── Logging ──
 
     override fun logError(tag: String?, message: String?) {}
     override fun logWarn(tag: String?, message: String?) {}

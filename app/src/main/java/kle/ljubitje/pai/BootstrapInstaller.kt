@@ -643,7 +643,7 @@ class BootstrapInstaller(
             echo -e "\033[1;36m[PAI] Updating bundled packages...\033[0m"
             apt update -y 2>&1 && apt upgrade -y 2>&1
             echo -e "\033[1;36m[PAI] Installing PAI prerequisites...\033[0m"
-            apt install -y git proot 2>&1
+            apt install -y git proot unzip 2>&1
             echo -e "\033[1;32m[PAI] Ready. Run 'pai-setup' to install PAI.\033[0m"
         """.trimIndent() + "\n")
         Log.i(TAG, "Created first-run update script in profile.d/")

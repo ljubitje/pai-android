@@ -1,9 +1,12 @@
-# PAI Android — user .bashrc (v4)
+# PAI Android — user .bashrc (v5)
 # Sourced by bash for interactive non-login shells,
 # and by /etc/profile for interactive login shells.
 
 # If not running interactively, don't do anything
-[[ $- != *i* ]] && return
+case $- in *i*) ;; *) return;; esac
+
+# If not bash, bail out — sh doesn't support shopt, PS1 escapes, etc.
+[ -z "$BASH_VERSION" ] && return
 
 # ── Prompt ──
 PS1='\[\e[1;34m\]pai\[\e[0m\]:\[\e[1;36m\]\w\[\e[0m\]\$ '
