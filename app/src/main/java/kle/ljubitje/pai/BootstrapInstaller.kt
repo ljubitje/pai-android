@@ -543,27 +543,64 @@ class BootstrapInstaller(
         if (dpkgBin.exists() && !dpkgReal.exists()) {
             dpkgBin.renameTo(dpkgReal)
         }
-        // Always rewrite wrapper (may have been updated with proot support)
+        // Always rewrite wrapper (patches .deb control scripts before dpkg processes them)
         if (dpkgReal.exists()) {
             val infoDir = "$p/var/lib/dpkg/info"
             dpkgBin.writeText("""
                 #!/data/data/$appPkg/files/usr/bin/sh
-                # Patch Termux shebangs in dpkg scripts (from previous operations)
-                for f in $infoDir/*.postinst $infoDir/*.preinst $infoDir/*.prerm $infoDir/*.postrm; do
-                    [ -f "${'$'}f" ] && sed -i 's|/data/data/com.termux|/data/data/$appPkg|g' "${'$'}f" 2>/dev/null
+                p=$p
+                appPkg=$appPkg
+                infoDir=$infoDir
+                iHome=$internalHome
+
+                # Patch existing dpkg maintainer scripts
+                for f in ${'$'}infoDir/*.postinst ${'$'}infoDir/*.preinst ${'$'}infoDir/*.prerm ${'$'}infoDir/*.postrm; do
+                    [ -f "${'$'}f" ] && sed -i 's|/data/data/com.termux|/data/data/'"${'$'}appPkg"'|g' "${'$'}f" 2>/dev/null
                 done
-                # Use proot to remap /data/data/com.termux → /data/data/$appPkg
-                # This fixes shebangs in preinst/postinst scripts extracted by dpkg to tmp.ci/
-                if [ -x "$p/bin/proot" ]; then
-                    HOME=$internalHome "$p/bin/proot" -b "/data/data/$appPkg:/data/data/com.termux" "$p/bin/dpkg.bin" "${'$'}@"
-                else
-                    HOME=$internalHome "$p/bin/dpkg.bin" "${'$'}@"
-                fi
+
+                # Rewrite .deb arguments to patch com.termux shebangs in control scripts
+                new_args=""
+                for arg in "${'$'}@"; do
+                    if [ -f "${'$'}arg" ] && echo "${'$'}arg" | grep -qE '\.deb${'$'}'; then
+                        pdir=${'$'}(mktemp -d "${'$'}p/tmp/deb-patch.XXXXXX")
+                        "${'$'}p/bin/dpkg-deb" --raw-extract "${'$'}arg" "${'$'}pdir/pkg" 2>/dev/null
+                        if [ -d "${'$'}pdir/pkg/DEBIAN" ]; then
+                            for f in "${'$'}pdir/pkg/DEBIAN/"*; do
+                                [ -f "${'$'}f" ] && sed -i 's|/data/data/com.termux|/data/data/'"${'$'}appPkg"'|g' "${'$'}f" 2>/dev/null
+                                [ -f "${'$'}f" ] && chmod 0755 "${'$'}f" 2>/dev/null
+                            done
+                            "${'$'}p/bin/dpkg-deb" -b "${'$'}pdir/pkg" "${'$'}pdir/patched.deb" 2>/dev/null
+                            if [ -f "${'$'}pdir/patched.deb" ]; then
+                                new_args="${'$'}new_args ${'$'}pdir/patched.deb"
+                            else
+                                new_args="${'$'}new_args ${'$'}arg"
+                            fi
+                        else
+                            new_args="${'$'}new_args ${'$'}arg"
+                            rm -rf "${'$'}pdir"
+                        fi
+                    else
+                        new_args="${'$'}new_args ${'$'}arg"
+                    fi
+                done
+
+                # Add --admindir if not already specified (dpkg.bin has hardcoded com.termux paths)
+                case "${'$'}new_args" in
+                    *--admindir*) ;;
+                    *) new_args="--admindir=${'$'}p/var/lib/dpkg --force-script-chrootless ${'$'}new_args" ;;
+                esac
+
+                HOME=${'$'}iHome "${'$'}p/bin/dpkg.bin" ${'$'}new_args
                 ret=${'$'}?
-                # Patch shebangs in newly extracted scripts (for next operation without proot)
-                for f in $infoDir/*.postinst $infoDir/*.preinst $infoDir/*.prerm $infoDir/*.postrm; do
-                    [ -f "${'$'}f" ] && sed -i 's|/data/data/com.termux|/data/data/$appPkg|g' "${'$'}f" 2>/dev/null
+
+                # Patch newly installed scripts
+                for f in ${'$'}infoDir/*.postinst ${'$'}infoDir/*.preinst ${'$'}infoDir/*.prerm ${'$'}infoDir/*.postrm; do
+                    [ -f "${'$'}f" ] && sed -i 's|/data/data/com.termux|/data/data/'"${'$'}appPkg"'|g' "${'$'}f" 2>/dev/null
                 done
+
+                # Clean up patched .deb temp dirs
+                rm -rf "${'$'}p/tmp/deb-patch."* 2>/dev/null
+
                 exit ${'$'}ret
             """.trimIndent() + "\n")
             dpkgBin.setExecutable(true, false)

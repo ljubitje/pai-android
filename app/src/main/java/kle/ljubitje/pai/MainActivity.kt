@@ -164,6 +164,84 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
             File(it).mkdirs()
         }
         deployShellConfigs()
+        migrateDpkgWrapper()
+    }
+
+    /** Upgrade dpkg wrapper to deb-patching version if stale. */
+    private fun migrateDpkgWrapper() {
+        try {
+            val dpkgBin = File("$PREFIX/bin/dpkg")
+            val dpkgReal = File("$PREFIX/bin/dpkg.bin")
+            if (!dpkgBin.exists() || !dpkgReal.exists()) return
+            val current = dpkgBin.readText()
+            if (current.contains("dpkg-deb") && current.contains("--admindir") && current.contains("chmod")) return
+
+            val appPkg = packageName
+            val p = "/data/data/$appPkg/files/usr"
+            val internalHome = "/data/data/$appPkg/files/home"
+            val infoDir = "$p/var/lib/dpkg/info"
+            dpkgBin.writeText("""
+                #!/data/data/$appPkg/files/usr/bin/sh
+                p=$p
+                appPkg=$appPkg
+                infoDir=$infoDir
+                iHome=$internalHome
+
+                # Patch existing dpkg maintainer scripts
+                for f in ${'$'}infoDir/*.postinst ${'$'}infoDir/*.preinst ${'$'}infoDir/*.prerm ${'$'}infoDir/*.postrm; do
+                    [ -f "${'$'}f" ] && sed -i 's|/data/data/com.termux|/data/data/'"${'$'}appPkg"'|g' "${'$'}f" 2>/dev/null
+                done
+
+                # Rewrite .deb arguments to patch com.termux shebangs in control scripts
+                new_args=""
+                for arg in "${'$'}@"; do
+                    if [ -f "${'$'}arg" ] && echo "${'$'}arg" | grep -qE '\.deb${'$'}'; then
+                        pdir=${'$'}(mktemp -d "${'$'}p/tmp/deb-patch.XXXXXX")
+                        "${'$'}p/bin/dpkg-deb" --raw-extract "${'$'}arg" "${'$'}pdir/pkg" 2>/dev/null
+                        if [ -d "${'$'}pdir/pkg/DEBIAN" ]; then
+                            for f in "${'$'}pdir/pkg/DEBIAN/"*; do
+                                [ -f "${'$'}f" ] && sed -i 's|/data/data/com.termux|/data/data/'"${'$'}appPkg"'|g' "${'$'}f" 2>/dev/null
+                                [ -f "${'$'}f" ] && chmod 0755 "${'$'}f" 2>/dev/null
+                            done
+                            "${'$'}p/bin/dpkg-deb" -b "${'$'}pdir/pkg" "${'$'}pdir/patched.deb" 2>/dev/null
+                            if [ -f "${'$'}pdir/patched.deb" ]; then
+                                new_args="${'$'}new_args ${'$'}pdir/patched.deb"
+                            else
+                                new_args="${'$'}new_args ${'$'}arg"
+                            fi
+                        else
+                            new_args="${'$'}new_args ${'$'}arg"
+                            rm -rf "${'$'}pdir"
+                        fi
+                    else
+                        new_args="${'$'}new_args ${'$'}arg"
+                    fi
+                done
+
+                # Add --admindir if not already specified (dpkg.bin has hardcoded com.termux paths)
+                case "${'$'}new_args" in
+                    *--admindir*) ;;
+                    *) new_args="--admindir=${'$'}p/var/lib/dpkg --force-script-chrootless ${'$'}new_args" ;;
+                esac
+
+                HOME=${'$'}iHome "${'$'}p/bin/dpkg.bin" ${'$'}new_args
+                ret=${'$'}?
+
+                # Patch newly installed scripts
+                for f in ${'$'}infoDir/*.postinst ${'$'}infoDir/*.preinst ${'$'}infoDir/*.prerm ${'$'}infoDir/*.postrm; do
+                    [ -f "${'$'}f" ] && sed -i 's|/data/data/com.termux|/data/data/'"${'$'}appPkg"'|g' "${'$'}f" 2>/dev/null
+                done
+
+                # Clean up patched .deb temp dirs
+                rm -rf "${'$'}p/tmp/deb-patch."* 2>/dev/null
+
+                exit ${'$'}ret
+            """.trimIndent() + "\n")
+            dpkgBin.setExecutable(true, false)
+            Log.i("MainActivity", "Migrated dpkg wrapper to deb-patching version")
+        } catch (e: Exception) {
+            Log.w("MainActivity", "Failed to migrate dpkg wrapper: ${e.message}")
+        }
     }
 
     /** Deploy shell config files and PAI setup script to HOME, updating stale versions. */
