@@ -174,7 +174,7 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
             val dpkgReal = File("$PREFIX/bin/dpkg.bin")
             if (!dpkgBin.exists() || !dpkgReal.exists()) return
             val current = dpkgBin.readText()
-            if (current.contains("dpkg-deb") && current.contains("--admindir") && current.contains("chmod")) return
+            if (current.contains("dpkg-deb") && current.contains("--admindir") && current.contains("grep -rlI")) return
 
             val appPkg = packageName
             val p = "/data/data/$appPkg/files/usr"
@@ -199,9 +199,14 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
                         pdir=${'$'}(mktemp -d "${'$'}p/tmp/deb-patch.XXXXXX")
                         "${'$'}p/bin/dpkg-deb" --raw-extract "${'$'}arg" "${'$'}pdir/pkg" 2>/dev/null
                         if [ -d "${'$'}pdir/pkg/DEBIAN" ]; then
+                            # Patch shebangs in control scripts
                             for f in "${'$'}pdir/pkg/DEBIAN/"*; do
                                 [ -f "${'$'}f" ] && sed -i 's|/data/data/com.termux|/data/data/'"${'$'}appPkg"'|g' "${'$'}f" 2>/dev/null
                                 [ -f "${'$'}f" ] && chmod 0755 "${'$'}f" 2>/dev/null
+                            done
+                            # Patch shebangs/paths in data files (skip binaries with -I)
+                            grep -rlI '/data/data/com.termux' "${'$'}pdir/pkg" 2>/dev/null | while read -r f; do
+                                sed -i 's|/data/data/com.termux|/data/data/'"${'$'}appPkg"'|g' "${'$'}f" 2>/dev/null
                             done
                             "${'$'}p/bin/dpkg-deb" -b "${'$'}pdir/pkg" "${'$'}pdir/patched.deb" 2>/dev/null
                             if [ -f "${'$'}pdir/patched.deb" ]; then
