@@ -644,21 +644,6 @@ class BootstrapInstaller(
             apt update -y 2>&1 && apt upgrade -y 2>&1
             echo -e "\033[1;36m[PAI] Installing PAI prerequisites...\033[0m"
             apt install -y git proot 2>&1
-            echo -e "\033[1;36m[PAI] Installing Claude Code...\033[0m"
-            npm install -g @anthropic-ai/claude-code 2>&1
-            # Fix shebangs in npm global binaries (they use /usr/bin/env which doesn't exist)
-            for f in $p/bin/claude $p/bin/tsx; do
-                [ -f "${'$'}f" ] && termux-fix-shebang "${'$'}f" 2>/dev/null
-            done
-            # Create proot wrapper for Claude Code (/tmp bind mount)
-            if [ -f "$p/bin/claude" ] && [ -f "$p/bin/proot" ]; then
-                cat > "$p/bin/claude-proot" << 'WRAPPER'
-#!/data/data/$appPkg/files/usr/bin/bash
-exec proot -b "${'$'}PREFIX/tmp:/tmp" claude "${'$'}@"
-WRAPPER
-                termux-fix-shebang "$p/bin/claude-proot" 2>/dev/null
-                chmod 755 "$p/bin/claude-proot"
-            fi
             echo -e "\033[1;32m[PAI] Ready. Run 'pai-setup' to install PAI.\033[0m"
         """.trimIndent() + "\n")
         Log.i(TAG, "Created first-run update script in profile.d/")
