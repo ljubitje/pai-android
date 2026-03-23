@@ -1,4 +1,4 @@
-# PAI Android — user .profile
+# PAI Android — user .profile (v2)
 # Sourced by bash for login shells when /etc/profile is not found.
 
 # Source system profile if it exists at our prefix

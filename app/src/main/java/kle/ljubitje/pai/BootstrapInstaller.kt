@@ -558,13 +558,22 @@ class BootstrapInstaller(
             dpkgBin.setExecutable(true, false)
         }
 
+        // Suppress Termux second-stage bootstrap warning.
+        // Our createAptConfig() already handles all package manager configuration,
+        // so the second-stage script is redundant. Replace it with a no-op and
+        // ensure the lock file exists so any caller exits silently.
+        val secondStageDir = File(prefixDir, "etc/termux/termux-bootstrap/second-stage")
+        if (secondStageDir.exists()) {
+            val script = File(secondStageDir, "termux-bootstrap-second-stage.sh")
+            script.writeText("#!/data/data/$appPkg/files/usr/bin/sh\n# Handled by PAI bootstrap\nexit 0\n")
+            script.setExecutable(true, false)
+            val lock = File(secondStageDir, "termux-bootstrap-second-stage.sh.lock")
+            if (!lock.exists()) createSymlink("termux-bootstrap-second-stage.sh", lock.absolutePath)
+        }
+
         Log.i(TAG, "Created apt.conf redirecting to $p")
     }
 
-    /**
-     * Creates a first-run script that updates bundled packages.
-     * The script is sourced by .bashrc on first login, then deletes itself.
-     */
     /**
      * Creates a first-run script in profile.d/ that updates bundled packages.
      * Sourced by $PREFIX/etc/profile on first login, then deletes itself.
@@ -576,10 +585,11 @@ class BootstrapInstaller(
         profileDir.mkdirs()
         val script = File(profileDir, "pai-first-run.sh")
         script.writeText("""
+            # Self-delete first to prevent concurrent runs
+            rm -f "$p/etc/profile.d/pai-first-run.sh"
             echo -e "\033[1;36m[PAI] Updating bundled packages...\033[0m"
             apt update -y 2>&1 && apt upgrade -y 2>&1
             echo -e "\033[1;32m[PAI] Packages up to date.\033[0m"
-            rm -f "$p/etc/profile.d/pai-first-run.sh"
         """.trimIndent() + "\n")
         Log.i(TAG, "Created first-run update script in profile.d/")
     }

@@ -121,7 +121,11 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
     }
 
     private fun restartWithBash() {
-        session?.finishIfRunning()
+        // Temporarily remove session finished listener to prevent
+        // onSessionFinished from also starting a new session
+        val oldSession = session
+        session = null
+        oldSession?.finishIfRunning()
         startTerminalSession()
     }
 
@@ -140,15 +144,20 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         deployShellConfigs()
     }
 
-    /** Deploy shell config files to HOME if not already present. */
+    /** Deploy shell config files to HOME, updating stale versions. */
     private fun deployShellConfigs() {
         mapOf("bashrc" to ".bashrc", "profile" to ".profile").forEach { (asset, filename) ->
             val dest = File(HOME, filename)
-            if (dest.exists()) return@forEach
             try {
-                assets.open(asset).bufferedReader().use { reader ->
-                    dest.writeText(reader.readText())
+                val bundled = assets.open(asset).bufferedReader().use { it.readText() }
+                if (dest.exists()) {
+                    // Extract version from first line: "# PAI Android — user .bashrc (v2)"
+                    val bundledVersion = Regex("""\(v(\d+)\)""").find(bundled.lineSequence().first())?.groupValues?.get(1) ?: return@forEach
+                    val existingFirst = dest.readText().lineSequence().first()
+                    val existingVersion = Regex("""\(v(\d+)\)""").find(existingFirst)?.groupValues?.get(1) ?: "0"
+                    if (existingVersion.toInt() >= bundledVersion.toInt()) return@forEach
                 }
+                dest.writeText(bundled)
             } catch (_: Exception) {
                 // Asset not found or HOME not writable — non-fatal
             }
@@ -231,6 +240,9 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
     override fun onTitleChanged(changedSession: TerminalSession) {}
 
     override fun onSessionFinished(finishedSession: TerminalSession) {
+        // Skip if session was cleared by restartWithBash() to prevent double-start
+        if (session == null || finishedSession !== session) return
+
         val now = System.currentTimeMillis()
         if (now - lastSessionStart < 2000) {
             sessionRestartCount++
