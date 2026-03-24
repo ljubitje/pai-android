@@ -308,17 +308,18 @@ class OnboardingActivity : ComponentActivity() {
                     setupProgress = 0.85f
                 }
 
-                // Install Bun (from Termux repo — PIE-compiled for Android)
+                // Install Bun (best-effort — may not be in default Termux repo)
                 if (shellCommandSucceeds("command -v bun")) {
                     appendLog("Bun already installed.")
                 } else {
-                    appendLog("$ apt install -y bun")
-                    runShellCommand("apt install -y bun 2>&1") { line ->
+                    // Try adding tur-repo first (Termux User Repository has bun)
+                    appendLog("$ apt install -y tur-repo && apt update && apt install -y bun")
+                    runShellCommand("apt install -y tur-repo 2>&1 && apt update -y 2>&1 && apt install -y bun 2>&1") { line ->
                         appendLog(line)
                         runOnUiThread { if (setupProgress < 0.92f) setupProgress += 0.005f }
                     }
                     if (!File("$prefix/bin/bun").exists()) {
-                        throw RuntimeException("Failed to install bun. Check your internet connection.")
+                        appendLog("Bun not available — will use Node.js instead.")
                     }
                 }
 
@@ -329,7 +330,7 @@ class OnboardingActivity : ComponentActivity() {
                 }
 
                 appendLog("Generating SSH keys...")
-                runShellCommand("[ -f ~/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N '' 2>&1") { line ->
+                runShellCommand("mkdir -p ~/.ssh && [ -f ~/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N '' 2>&1") { line ->
                     appendLog(line)
                 }
 
