@@ -385,6 +385,16 @@ class OnboardingActivity : ComponentActivity() {
                         runOnUiThread { if (installProgress < 0.2f) installProgress += 0.005f }
                     }
                 }
+                // Also install tsx (TypeScript runner — needed because bun.sh binary is glibc, not Android-compatible)
+                if (!shellCommandSucceeds("command -v tsx")) {
+                    appendInstallLog("$ npm install -g tsx")
+                    runShellCommand("npm install -g tsx 2>&1") { line ->
+                        appendInstallLog(line)
+                        runOnUiThread { if (installProgress < 0.22f) installProgress += 0.003f }
+                    }
+                    runShellCommand("termux-fix-shebang $prefix/bin/tsx 2>/dev/null || true") { _ -> }
+                }
+
                 runOnUiThread {
                     markStep(installSteps, 0, StepStatus.DONE)
                     installProgress = 0.25f
@@ -460,13 +470,14 @@ class OnboardingActivity : ComponentActivity() {
                     appendInstallLog("PAI deployed! Launching installer...")
                 }
 
-                // Brief pause then launch terminal with install.sh
+                // Brief pause then launch terminal with PAI installer via tsx
+                // (install.sh requires bun which is glibc-only; tsx uses Node.js)
                 Thread.sleep(1200)
                 runOnUiThread {
                     val intent = Intent(this@OnboardingActivity, MainActivity::class.java)
                     intent.putExtra(
                         MainActivity.EXTRA_RUN_COMMAND,
-                        "cd '$home/.claude' && bash install.sh"
+                        "cd '$home/.claude' && tsx PAI-Install/main.ts --mode cli"
                     )
                     startActivity(intent)
                     finish()
