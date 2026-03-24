@@ -102,6 +102,7 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         }
         deployShellConfigs()
         migrateDpkgWrapper()
+        deployNodeFix()
     }
 
     /** Upgrade dpkg wrapper to deb-patching version if stale. */
@@ -207,6 +208,20 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         deployPaiSetup()
     }
 
+    /** Deploy Node.js preload fix for com.termux hardcoded paths. */
+    private fun deployNodeFix() {
+        try {
+            val dest = File("$PREFIX/lib", "node-termux-fix.js")
+            if (!dest.exists()) {
+                val content = assets.open("node-termux-fix.js").bufferedReader().use { it.readText() }
+                dest.writeText(content)
+                Log.i("MainActivity", "Deployed node-termux-fix.js")
+            }
+        } catch (e: Exception) {
+            Log.w("MainActivity", "Failed to deploy node-termux-fix.js: ${e.message}")
+        }
+    }
+
     /** Deploy pai-setup script to $PREFIX/bin/. */
     private fun deployPaiSetup() {
         try {
@@ -227,11 +242,13 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         val shell = findShell()
         val env = arrayOf(
             "HOME=$HOME",
+            "PAI_DIR=$HOME/.claude",
             "PREFIX=$PREFIX",
+            "SHELL=$shell",
             "TERM=xterm-256color",
             "LANG=en_US.UTF-8",
-            "BUN_INSTALL=$PREFIX/bun",
-            "PATH=$PREFIX/bun/bin:$PREFIX/bin:/system/bin:/system/xbin",
+            "BUN_INSTALL=$PREFIX",
+            "PATH=$PREFIX/bin:/system/bin:/system/xbin",
             "TERMUX_VERSION=PAI",
             "COLORTERM=truecolor",
             "TMPDIR=$PREFIX/tmp",
@@ -244,7 +261,8 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
             "SSL_CERT_FILE=$PREFIX/etc/tls/cert.pem",
             "GIT_EXEC_PATH=$PREFIX/libexec/git-core",
             "GIT_TEMPLATE_DIR=$PREFIX/share/git-core/templates",
-            "GIT_SSL_CAINFO=$PREFIX/etc/tls/cert.pem"
+            "GIT_SSL_CAINFO=$PREFIX/etc/tls/cert.pem",
+            "NODE_OPTIONS=--require=$PREFIX/lib/node-termux-fix.js"
         )
 
         session = TerminalSession(

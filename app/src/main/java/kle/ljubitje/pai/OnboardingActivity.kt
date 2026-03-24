@@ -86,6 +86,7 @@ class OnboardingActivity : ComponentActivity() {
         SetupStep("Configuring package manager", StepStatus.PENDING),
         SetupStep("Updating packages", StepStatus.PENDING),
         SetupStep("Installing prerequisites", StepStatus.PENDING),
+        SetupStep("Installing Bun", StepStatus.PENDING),
         SetupStep("Finalizing setup", StepStatus.PENDING),
     )
     private val logLines = mutableStateListOf<String>()
@@ -96,9 +97,9 @@ class OnboardingActivity : ComponentActivity() {
     private var installStepIndex by mutableIntStateOf(0)
     private val installSteps = mutableStateListOf(
         SetupStep("Installing Node.js", StepStatus.PENDING),
-        SetupStep("Installing tsx", StepStatus.PENDING),
         SetupStep("Installing Claude Code", StepStatus.PENDING),
         SetupStep("Cloning PAI repository", StepStatus.PENDING),
+        SetupStep("Deploying PAI", StepStatus.PENDING),
     )
     private val installLogLines = mutableStateListOf<String>()
 
@@ -147,12 +148,9 @@ class OnboardingActivity : ComponentActivity() {
                                 logLines = installLogLines,
                                 error = installError,
                                 onRetry = ::startPaiInstall,
-                                showSkip = true,
-                                onSkip = ::launchTerminal,
                             )
                             "ready" -> ReadyScreen(
                                 onInstallPai = ::startPaiInstall,
-                                onSkipToTerminal = ::launchTerminal
                             )
                         }
                     }
@@ -288,17 +286,46 @@ class OnboardingActivity : ComponentActivity() {
                     setupProgress = 0.6f
                 }
 
+                deployNodeFix()
                 appendLog("$ apt install -y git proot openssh unzip")
-                runShellCommand("apt install -y git proot openssh unzip 2>&1") { line ->
+                val aptExitCode = runShellCommand("apt install -y git proot openssh unzip 2>&1") { line ->
                     appendLog(line)
                     runOnUiThread {
                         if (setupProgress < 0.85f) setupProgress += 0.005f
                     }
                 }
+
+                // Verify critical binaries were actually installed
+                val requiredBins = listOf("git", "proot", "ssh")
+                val missingBins = requiredBins.filter { !File("$prefix/bin/$it").exists() }
+                if (missingBins.isNotEmpty()) {
+                    throw RuntimeException("Failed to install packages. Missing: ${missingBins.joinToString()}. Check your internet connection.")
+                }
+
                 runOnUiThread {
                     markStep(setupSteps, 3, StepStatus.DONE)
                     markStep(setupSteps, 4, StepStatus.ACTIVE)
-                    setupProgress = 0.9f
+                    setupProgress = 0.85f
+                }
+
+                // Install Bun (from Termux repo — PIE-compiled for Android)
+                if (shellCommandSucceeds("command -v bun")) {
+                    appendLog("Bun already installed.")
+                } else {
+                    appendLog("$ apt install -y bun")
+                    runShellCommand("apt install -y bun 2>&1") { line ->
+                        appendLog(line)
+                        runOnUiThread { if (setupProgress < 0.92f) setupProgress += 0.005f }
+                    }
+                    if (!File("$prefix/bin/bun").exists()) {
+                        throw RuntimeException("Failed to install bun. Check your internet connection.")
+                    }
+                }
+
+                runOnUiThread {
+                    markStep(setupSteps, 4, StepStatus.DONE)
+                    markStep(setupSteps, 5, StepStatus.ACTIVE)
+                    setupProgress = 0.93f
                 }
 
                 appendLog("Generating SSH keys...")
@@ -309,7 +336,7 @@ class OnboardingActivity : ComponentActivity() {
                 File("$prefix/etc/profile.d/pai-first-run.sh").delete()
 
                 runOnUiThread {
-                    markStep(setupSteps, 4, StepStatus.DONE)
+                    markStep(setupSteps, 5, StepStatus.DONE)
                     setupProgress = 1f
                     appendLog("")
                     appendLog("Setup complete!")
@@ -351,8 +378,8 @@ class OnboardingActivity : ComponentActivity() {
                     appendInstallLog("Node.js already installed.")
                     runShellCommand("node --version") { line -> appendInstallLog("Node.js: $line") }
                 } else {
-                    appendInstallLog("$ apt install -y nodejs-lts")
-                    runShellCommand("apt install -y nodejs-lts 2>&1") { line ->
+                    appendInstallLog("$ apt install -y nodejs")
+                    runShellCommand("apt install -y nodejs 2>&1") { line ->
                         appendInstallLog(line)
                         runOnUiThread { if (installProgress < 0.2f) installProgress += 0.005f }
                     }
@@ -362,26 +389,8 @@ class OnboardingActivity : ComponentActivity() {
                     installProgress = 0.25f
                 }
 
-                // Step 2: tsx
+                // Step 2: Claude Code
                 runOnUiThread { markStep(installSteps, 1, StepStatus.ACTIVE) }
-
-                if (shellCommandSucceeds("command -v tsx")) {
-                    appendInstallLog("tsx already installed.")
-                } else {
-                    appendInstallLog("$ npm install -g tsx")
-                    runShellCommand("npm install -g tsx 2>&1") { line ->
-                        appendInstallLog(line)
-                        runOnUiThread { if (installProgress < 0.45f) installProgress += 0.005f }
-                    }
-                    runShellCommand("termux-fix-shebang $prefix/bin/tsx 2>/dev/null || true") { _ -> }
-                }
-                runOnUiThread {
-                    markStep(installSteps, 1, StepStatus.DONE)
-                    installProgress = 0.5f
-                }
-
-                // Step 3: Claude Code
-                runOnUiThread { markStep(installSteps, 2, StepStatus.ACTIVE) }
 
                 if (shellCommandSucceeds("command -v claude")) {
                     appendInstallLog("Claude Code already installed.")
@@ -390,59 +399,73 @@ class OnboardingActivity : ComponentActivity() {
                     appendInstallLog("$ npm install -g @anthropic-ai/claude-code")
                     runShellCommand("npm install -g @anthropic-ai/claude-code 2>&1") { line ->
                         appendInstallLog(line)
-                        runOnUiThread { if (installProgress < 0.7f) installProgress += 0.003f }
+                        runOnUiThread { if (installProgress < 0.45f) installProgress += 0.003f }
                     }
                     runShellCommand("termux-fix-shebang $prefix/bin/claude 2>/dev/null || true") { _ -> }
                 }
                 runOnUiThread {
-                    markStep(installSteps, 2, StepStatus.DONE)
-                    installProgress = 0.75f
+                    markStep(installSteps, 1, StepStatus.DONE)
+                    installProgress = 0.5f
                 }
 
-                // Step 4: Clone PAI repo
-                runOnUiThread { markStep(installSteps, 3, StepStatus.ACTIVE) }
+                // Step 3: Clone PAI repo (full clone)
+                runOnUiThread { markStep(installSteps, 2, StepStatus.ACTIVE) }
 
                 val paiRepo = "$prefix/tmp/pai-repo"
-                val paiClaudeDir = "$paiRepo/Releases/v4.0.3/.claude"
+                val paiReleaseDir = "$paiRepo/Releases/v4.0.3"
+                val paiClaudeDir = "$paiReleaseDir/.claude"
 
-                if (File("$paiClaudeDir/PAI-Install/main.ts").exists()) {
+                if (File("$paiClaudeDir/install.sh").exists()) {
                     appendInstallLog("PAI repository already cloned, updating...")
                     runShellCommand("git -C '$paiRepo' pull --ff-only 2>/dev/null || true") { line ->
                         appendInstallLog(line)
                     }
                 } else {
-                    appendInstallLog("$ git clone --sparse PAI repository")
+                    appendInstallLog("$ git clone PAI repository")
                     runShellCommand("""
                         rm -rf '$paiRepo'
-                        git clone --depth 1 --filter=blob:none --sparse \
-                            'https://github.com/danielmiessler/Personal_AI_Infrastructure.git' \
-                            '$paiRepo' 2>&1
-                        git -C '$paiRepo' sparse-checkout set 'Releases/v4.0.3/.claude' 2>&1
+                        git clone 'https://github.com/danielmiessler/Personal_AI_Infrastructure.git' '$paiRepo' 2>&1
                     """.trimIndent()) { line ->
                         appendInstallLog(line)
-                        runOnUiThread { if (installProgress < 0.95f) installProgress += 0.005f }
+                        runOnUiThread { if (installProgress < 0.85f) installProgress += 0.003f }
                     }
                 }
 
-                if (!File("$paiClaudeDir/PAI-Install/main.ts").exists()) {
-                    throw RuntimeException("PAI-Install/main.ts not found after clone")
+                if (!File("$paiClaudeDir/install.sh").exists()) {
+                    throw RuntimeException("install.sh not found after clone")
+                }
+
+                runOnUiThread {
+                    markStep(installSteps, 2, StepStatus.DONE)
+                    installProgress = 0.85f
+                }
+
+                // Step 4: Copy .claude release to home directory
+                runOnUiThread { markStep(installSteps, 3, StepStatus.ACTIVE) }
+
+                appendInstallLog("$ cp -r .claude ~/")
+                runShellCommand("rm -rf '$home/.claude' && cp -r '$paiClaudeDir' '$home/.claude' 2>&1") { line ->
+                    appendInstallLog(line)
+                }
+
+                if (!File("$home/.claude/install.sh").exists()) {
+                    throw RuntimeException("Failed to copy PAI release to $home/.claude")
                 }
 
                 runOnUiThread {
                     markStep(installSteps, 3, StepStatus.DONE)
                     installProgress = 1f
                     appendInstallLog("")
-                    appendInstallLog("PAI installation ready!")
-                    appendInstallLog("Launching PAI installer...")
+                    appendInstallLog("PAI deployed! Launching installer...")
                 }
 
-                // Brief pause then launch terminal with interactive installer
+                // Brief pause then launch terminal with install.sh
                 Thread.sleep(1200)
                 runOnUiThread {
                     val intent = Intent(this@OnboardingActivity, MainActivity::class.java)
                     intent.putExtra(
                         MainActivity.EXTRA_RUN_COMMAND,
-                        "cd '$paiClaudeDir' && tsx PAI-Install/main.ts --mode cli"
+                        "cd '$home/.claude' && bash install.sh"
                     )
                     startActivity(intent)
                     finish()
@@ -461,7 +484,7 @@ class OnboardingActivity : ComponentActivity() {
 
     // ── Shell helpers ──
 
-    private fun runShellCommand(command: String, onLine: (String) -> Unit) {
+    private fun runShellCommand(command: String, onLine: (String) -> Unit): Int {
         val env = buildShellEnv()
         val shell = if (File("$prefix/bin/bash").exists()) "$prefix/bin/bash" else "$prefix/bin/sh"
         val pb = ProcessBuilder(shell, "-c", command)
@@ -482,6 +505,7 @@ class OnboardingActivity : ComponentActivity() {
         }
         val exitCode = process.waitFor()
         Log.i(TAG, "Command finished with exit code $exitCode: ${command.take(40)}")
+        return exitCode
     }
 
     private fun shellCommandSucceeds(command: String): Boolean {
@@ -505,9 +529,11 @@ class OnboardingActivity : ComponentActivity() {
 
     private fun buildShellEnv(): Array<String> = arrayOf(
         "HOME=$home",
+        "PAI_DIR=$home/.claude",
         "PREFIX=$prefix",
         "TERM=dumb",
         "LANG=en_US.UTF-8",
+        "BUN_INSTALL=$prefix",
         "PATH=$prefix/bin:/system/bin:/system/xbin",
         "TMPDIR=$prefix/tmp",
         "LD_LIBRARY_PATH=$prefix/lib",
@@ -520,6 +546,7 @@ class OnboardingActivity : ComponentActivity() {
         "GIT_EXEC_PATH=$prefix/libexec/git-core",
         "GIT_TEMPLATE_DIR=$prefix/share/git-core/templates",
         "GIT_SSL_CAINFO=$prefix/etc/tls/cert.pem",
+        "NODE_OPTIONS=--require=$prefix/lib/node-termux-fix.js",
     )
 
     private fun markStep(steps: MutableList<SetupStep>, index: Int, status: StepStatus) {
@@ -550,6 +577,23 @@ class OnboardingActivity : ComponentActivity() {
         }
     }
 
+    private fun launchTerminal() {
+        startActivity(Intent(this, MainActivity::class.java))
+        finish()
+    }
+
+    /** Deploy Node.js preload fix for com.termux hardcoded paths. */
+    private fun deployNodeFix() {
+        try {
+            val dest = File("$prefix/lib", "node-termux-fix.js")
+            val content = assets.open("node-termux-fix.js").bufferedReader().use { it.readText() }
+            dest.writeText(content)
+            Log.i(TAG, "Deployed node-termux-fix.js")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to deploy node-termux-fix.js: ${e.message}")
+        }
+    }
+
     private fun deployPaiSetup() {
         try {
             val setupDest = File("$prefix/bin", "pai-setup")
@@ -561,10 +605,6 @@ class OnboardingActivity : ComponentActivity() {
         }
     }
 
-    private fun launchTerminal() {
-        startActivity(Intent(this, MainActivity::class.java))
-        finish()
-    }
 }
 
 data class SetupStep(
@@ -661,8 +701,6 @@ fun ProgressScreen(
     logLines: List<String>,
     error: String?,
     onRetry: () -> Unit,
-    showSkip: Boolean = false,
-    onSkip: (() -> Unit)? = null,
 ) {
     Column(
         modifier = Modifier
@@ -785,20 +823,6 @@ fun ProgressScreen(
             }
         }
 
-        if (showSkip && onSkip != null) {
-            Spacer(Modifier.height(4.dp))
-            TextButton(
-                onClick = onSkip,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    text = "Skip to Terminal",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-
         Spacer(Modifier.height(16.dp))
     }
 }
@@ -884,7 +908,6 @@ fun StepRow(step: SetupStep) {
 @Composable
 fun ReadyScreen(
     onInstallPai: () -> Unit,
-    onSkipToTerminal: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -899,21 +922,21 @@ fun ReadyScreen(
             modifier = Modifier
                 .size(80.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f)),
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                text = "\u2713",
-                fontSize = 40.sp,
+                text = "PAI",
+                fontSize = 24.sp,
                 fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.secondary,
+                color = MaterialTheme.colorScheme.primary,
             )
         }
 
         Spacer(Modifier.height(32.dp))
 
         Text(
-            text = "PAI is Ready",
+            text = "Environment Ready",
             style = MaterialTheme.typography.headlineLarge,
             color = MaterialTheme.colorScheme.onBackground,
         )
@@ -921,7 +944,7 @@ fun ReadyScreen(
         Spacer(Modifier.height(12.dp))
 
         Text(
-            text = "Your development environment is set up.\nInstall PAI to get started with your\nPersonal AI Infrastructure.",
+            text = "Your development environment is set up.\nTap below to install PAI — your\nPersonal AI Infrastructure.",
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
@@ -945,16 +968,6 @@ fun ReadyScreen(
                 text = "Install PAI",
                 style = MaterialTheme.typography.labelLarge,
                 fontSize = 18.sp,
-            )
-        }
-
-        Spacer(Modifier.height(16.dp))
-
-        TextButton(onClick = onSkipToTerminal) {
-            Text(
-                text = "Skip to Terminal",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
