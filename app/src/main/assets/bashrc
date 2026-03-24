@@ -1,4 +1,4 @@
-# PAI Android — user .bashrc (v5)
+# PAI Android — user .bashrc (v6)
 # Sourced by bash for interactive non-login shells,
 # and by /etc/profile for interactive login shells.
 
@@ -23,6 +23,8 @@ shopt -s globstar 2>/dev/null
 
 # ── Environment ──
 export TMPDIR="$PREFIX/tmp"
+# Node.js global module resolution (for bun polyfill and other global pkgs)
+export NODE_PATH="$PREFIX/lib/node_modules"
 export GIT_EXEC_PATH="$PREFIX/libexec/git-core"
 export GIT_TEMPLATE_DIR="$PREFIX/share/git-core/templates"
 export GIT_SSL_CAINFO="$PREFIX/etc/tls/cert.pem"
@@ -49,6 +51,9 @@ alias install='pkg install'
 alias search='pkg search'
 
 # ── PAI ──
+# PAI CLI alias
+alias pai='bun "$HOME/.claude/PAI/Tools/pai.ts"'
+
 # Claude Code wrapper (bind-mount /tmp for Claude Code compatibility)
 if command -v proot &>/dev/null && command -v claude &>/dev/null; then
     alias claude='proot -b "$PREFIX/tmp:/tmp" claude'

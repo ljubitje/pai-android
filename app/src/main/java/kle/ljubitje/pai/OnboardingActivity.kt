@@ -106,14 +106,18 @@ class OnboardingActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Already bootstrapped + has permission → go straight to terminal
+        // Already bootstrapped + has permission → check if PAI is installed
         if (hasStoragePermission() && BootstrapInstaller.isBootstrapped(prefix)) {
-            launchTerminal()
-            return
+            if (isPaiInstalled()) {
+                launchTerminal()
+                return
+            }
+            // Bootstrap done but PAI not installed → show ready screen
+            currentScreen = "ready"
         }
 
         // Has permission but not bootstrapped → skip to setup
-        if (hasStoragePermission()) {
+        if (hasStoragePermission() && currentScreen == "permission") {
             currentScreen = "setup"
         }
 
@@ -169,6 +173,11 @@ class OnboardingActivity : ComponentActivity() {
             currentScreen = "setup"
             startSetup()
         }
+    }
+
+    /** PAI is installed when settings.json exists (written by the installer wizard). */
+    private fun isPaiInstalled(): Boolean {
+        return File("$home/.claude/settings.json").exists()
     }
 
     private fun hasStoragePermission(): Boolean {
@@ -385,7 +394,7 @@ class OnboardingActivity : ComponentActivity() {
                         runOnUiThread { if (installProgress < 0.2f) installProgress += 0.005f }
                     }
                 }
-                // Also install tsx (TypeScript runner — needed because bun.sh binary is glibc, not Android-compatible)
+                // Install tsx and bun via npm (bun.sh binary is glibc, not Android-compatible)
                 if (!shellCommandSucceeds("command -v tsx")) {
                     appendInstallLog("$ npm install -g tsx")
                     runShellCommand("npm install -g tsx 2>&1") { line ->
@@ -394,6 +403,9 @@ class OnboardingActivity : ComponentActivity() {
                     }
                     runShellCommand("termux-fix-shebang $prefix/bin/tsx 2>/dev/null || true") { _ -> }
                 }
+                // Deploy bun shim and polyfill (native bun is glibc-only)
+                deployBunShim()
+                deployBunPolyfill()
 
                 runOnUiThread {
                     markStep(installSteps, 0, StepStatus.DONE)
@@ -461,6 +473,27 @@ class OnboardingActivity : ComponentActivity() {
 
                 if (!File("$home/.claude/install.sh").exists()) {
                     throw RuntimeException("Failed to copy PAI release to $home/.claude")
+                }
+
+                // Link PAI core skill into skills directory (validation expects skills/PAI/SKILL.md)
+                val skillsDir = File("$home/.claude/skills/PAI")
+                if (!skillsDir.exists() && File("$home/.claude/PAI/SKILL.md").exists()) {
+                    appendInstallLog("Linking PAI core skill...")
+                    skillsDir.mkdirs()
+                    runShellCommand("cp '$home/.claude/PAI/SKILL.md' '$home/.claude/skills/PAI/SKILL.md' 2>&1") { line ->
+                        appendInstallLog(line)
+                    }
+                }
+
+                // Create .zshrc with PAI alias (installer validation checks .zshrc)
+                val zshrc = File(home, ".zshrc")
+                if (!zshrc.exists()) {
+                    appendInstallLog("Creating .zshrc for shell alias...")
+                    zshrc.writeText("""
+                        |# PAI Android — .zshrc shim for installer validation
+                        |# PAI alias
+                        |alias pai='bun /storage/emulated/0/.claude/PAI/Tools/pai.ts'
+                    """.trimMargin() + "\n")
                 }
 
                 runOnUiThread {
@@ -559,6 +592,7 @@ class OnboardingActivity : ComponentActivity() {
         "GIT_TEMPLATE_DIR=$prefix/share/git-core/templates",
         "GIT_SSL_CAINFO=$prefix/etc/tls/cert.pem",
         "NODE_OPTIONS=--require=$prefix/lib/node-termux-fix.js",
+        "NODE_PATH=$prefix/lib/node_modules",
     )
 
     private fun markStep(steps: MutableList<SetupStep>, index: Int, status: StepStatus) {
@@ -590,6 +624,8 @@ class OnboardingActivity : ComponentActivity() {
     }
 
     private fun launchTerminal() {
+        // Always deploy latest shell configs (bashrc version check handles no-op)
+        deployShellConfigs()
         startActivity(Intent(this, MainActivity::class.java))
         finish()
     }
@@ -603,6 +639,40 @@ class OnboardingActivity : ComponentActivity() {
             Log.i(TAG, "Deployed node-termux-fix.js")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to deploy node-termux-fix.js: ${e.message}")
+        }
+    }
+
+    /** Deploy Bun API polyfill so PAI scripts that import from "bun" work under Node.js/tsx. */
+    private fun deployBunPolyfill() {
+        try {
+            val bunModuleDir = File("$prefix/lib/node_modules/bun")
+            bunModuleDir.mkdirs()
+            for (filename in listOf("index.js", "package.json")) {
+                val dest = File(bunModuleDir, filename)
+                val content = assets.open("bun-polyfill/$filename").bufferedReader().use { it.readText() }
+                dest.writeText(content)
+            }
+            Log.i(TAG, "Deployed bun polyfill module")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to deploy bun polyfill: ${e.message}")
+        }
+    }
+
+    /** Deploy a bun shim that delegates to node/tsx (native bun is glibc-only). */
+    private fun deployBunShim() {
+        try {
+            val bunDest = File("$prefix/bin", "bun")
+            val content = assets.open("bun-shim.sh").bufferedReader().use { it.readText() }
+            bunDest.writeText(content)
+            bunDest.setExecutable(true, false)
+            // Also create bunx symlink
+            val bunxDest = File("$prefix/bin", "bunx")
+            if (!bunxDest.exists()) {
+                android.system.Os.symlink("bun", bunxDest.absolutePath)
+            }
+            Log.i(TAG, "Deployed bun shim")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to deploy bun shim: ${e.message}")
         }
     }
 

@@ -1,0 +1,6 @@
+{
+  "name": "bun",
+  "version": "1.2.0",
+  "description": "Bun API polyfill for Node.js on Android",
+  "main": "index.js"
+}
