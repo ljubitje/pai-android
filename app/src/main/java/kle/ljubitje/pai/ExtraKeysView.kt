@@ -1,6 +1,7 @@
 package kle.ljubitje.pai
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.text.InputType
@@ -38,6 +39,15 @@ class ExtraKeysView(
             setPadding(0, dp(2), 0, dp(2))
         }
 
+        // Settings gear button (left side)
+        arrowRow.addView(createButton("\u2699") {  // ⚙
+            context.startActivity(Intent(context, SettingsActivity::class.java))
+        })
+
+        // Spacer to push arrows to center
+        val spacer = android.view.View(context)
+        arrowRow.addView(spacer, LayoutParams(0, 1, 1f))
+
         val arrows = listOf(
             "\u2190" to KeyEvent.KEYCODE_DPAD_LEFT,   // ←
             "\u2193" to KeyEvent.KEYCODE_DPAD_DOWN,    // ↓
@@ -47,6 +57,11 @@ class ExtraKeysView(
         for ((label, keyCode) in arrows) {
             arrowRow.addView(createButton(label) { sendKey(keyCode) })
         }
+
+        // Spacer for symmetry
+        val spacerRight = android.view.View(context)
+        arrowRow.addView(spacerRight, LayoutParams(0, 1, 1f))
+
         addView(arrowRow, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
 
         // Row 2: text input + send button
@@ -76,12 +91,12 @@ class ExtraKeysView(
             imeOptions = EditorInfo.IME_FLAG_NO_ENTER_ACTION
             isSingleLine = false
 
-            // When field is empty, Enter sends newline to terminal (accept defaults)
+            // When field is empty, Enter sends CR to terminal (accept defaults in TUI apps)
             setOnKeyListener { _, keyCode, event ->
                 if (keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN) {
                     if (text.isNullOrEmpty()) {
                         val session = terminalView.currentSession ?: return@setOnKeyListener false
-                        session.write("\n")
+                        session.write("\r")
                         true
                     } else false
                 } else false
@@ -95,10 +110,10 @@ class ExtraKeysView(
             val session = terminalView.currentSession ?: return@createButton
             val text = inputField.text.toString()
             if (text.isNotEmpty()) {
-                session.write(text + "\n")
+                session.write(text + "\r")
                 inputField.text.clear()
             } else {
-                session.write("\n")
+                session.write("\r")
             }
         }
         inputRow.addView(sendBtn)

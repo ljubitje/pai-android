@@ -33,6 +33,11 @@
             android:configChanges="orientation|screenSize|keyboard|keyboardHidden"
             android:theme="@style/Theme.PAI" />
 
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:theme="@style/Theme.PAI" />
+
     </application>
 
 </manifest>

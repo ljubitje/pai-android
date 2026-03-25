@@ -69,7 +69,8 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         setupFilesystem()
 
         terminalView = TerminalView(this, null)
-        terminalView.setTextSize(24)
+        val prefs = getSharedPreferences(SettingsActivity.PREFS_NAME, Context.MODE_PRIVATE)
+        terminalView.setTextSize(prefs.getInt(SettingsActivity.KEY_FONT_SIZE, SettingsActivity.DEFAULT_FONT_SIZE))
 
         val extraKeysView = ExtraKeysView(this, terminalView)
 
@@ -89,6 +90,13 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         setContentView(layout)
 
         startTerminalSession()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Re-apply font size in case it was changed in settings
+        val prefs = getSharedPreferences(SettingsActivity.PREFS_NAME, Context.MODE_PRIVATE)
+        terminalView.setTextSize(prefs.getInt(SettingsActivity.KEY_FONT_SIZE, SettingsActivity.DEFAULT_FONT_SIZE))
     }
 
     override fun onDestroy() {
