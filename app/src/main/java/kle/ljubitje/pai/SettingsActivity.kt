@@ -59,8 +59,6 @@ class SettingsActivity : ComponentActivity() {
         // Delete ~/.claude directory
         val claudeDir = File("$home/.claude")
         if (claudeDir.exists()) claudeDir.deleteRecursively()
-        // Also remove .zshrc shim
-        File(home, ".zshrc").delete()
 
         // Restart into onboarding
         val intent = Intent(this, OnboardingActivity::class.java)

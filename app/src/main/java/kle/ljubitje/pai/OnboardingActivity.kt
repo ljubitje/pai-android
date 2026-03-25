@@ -485,17 +485,6 @@ class OnboardingActivity : ComponentActivity() {
                     }
                 }
 
-                // Create .zshrc with PAI alias (installer validation checks .zshrc)
-                val zshrc = File(home, ".zshrc")
-                if (!zshrc.exists()) {
-                    appendInstallLog("Creating .zshrc for shell alias...")
-                    zshrc.writeText("""
-                        |# PAI Android — .zshrc shim for installer validation
-                        |# PAI alias
-                        |alias pai='bun /storage/emulated/0/.claude/PAI/Tools/pai.ts'
-                    """.trimMargin() + "\n")
-                }
-
                 runOnUiThread {
                     markStep(installSteps, 3, StepStatus.DONE)
                     installProgress = 1f
