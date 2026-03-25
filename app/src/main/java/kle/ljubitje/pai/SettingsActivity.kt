@@ -1,11 +1,13 @@
 package kle.ljubitje.pai
 
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import android.os.Environment
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,11 +24,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -46,6 +53,20 @@ class SettingsActivity : ComponentActivity() {
         const val PREFS_NAME = "pai_settings"
         const val KEY_FONT_SIZE = "terminal_font_size"
         const val DEFAULT_FONT_SIZE = 24
+    }
+
+    private fun wipeAndReinstall(home: String) {
+        // Delete ~/.claude directory
+        val claudeDir = File("$home/.claude")
+        if (claudeDir.exists()) claudeDir.deleteRecursively()
+        // Also remove .zshrc shim
+        File(home, ".zshrc").delete()
+
+        // Restart into onboarding
+        val intent = Intent(this, OnboardingActivity::class.java)
+        intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        startActivity(intent)
+        finishAffinity()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -74,6 +95,7 @@ class SettingsActivity : ComponentActivity() {
                     prefix = prefix,
                     home = home,
                     onBack = { finish() },
+                    onWipeAndReinstall = { wipeAndReinstall(home) },
                 )
             }
         }
@@ -88,6 +110,7 @@ fun SettingsScreen(
     prefix: String,
     home: String,
     onBack: () -> Unit,
+    onWipeAndReinstall: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -251,6 +274,74 @@ fun SettingsScreen(
             InfoRow("Prefix", prefix)
             CardDivider()
             InfoRow("PAI Dir", "$home/.claude")
+        }
+
+        Spacer(Modifier.height(28.dp))
+
+        // ── Danger Zone ──
+        SectionHeader("Danger Zone")
+
+        var showWipeDialog by remember { mutableStateOf(false) }
+
+        SettingsCard {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showWipeDialog = true }
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Wipe & Reinstall PAI",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = Color(0xFFF85149),
+                    )
+                    Text(
+                        text = "Deletes ~/.claude and restarts the installer",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        if (showWipeDialog) {
+            AlertDialog(
+                onDismissRequest = { showWipeDialog = false },
+                containerColor = MaterialTheme.colorScheme.surface,
+                title = {
+                    Text(
+                        "Wipe & Reinstall?",
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                },
+                text = {
+                    Text(
+                        "This will delete your entire ~/.claude directory including settings, skills, and PAI configuration. The base system (Node.js, Git, etc.) will be kept.\n\nYou'll need to run the PAI installer again.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showWipeDialog = false
+                            onWipeAndReinstall()
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFF85149),
+                            contentColor = Color.White,
+                        ),
+                    ) {
+                        Text("Wipe & Reinstall")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showWipeDialog = false }) {
+                        Text("Cancel", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                },
+            )
         }
 
         Spacer(Modifier.height(48.dp))
