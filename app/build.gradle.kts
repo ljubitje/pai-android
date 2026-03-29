@@ -42,6 +42,10 @@ android {
     androidResources {
         noCompress += "zip"
     }
+
+    lint {
+        disable += "ExpiredTargetSdkVersion"
+    }
 }
 
 dependencies {
