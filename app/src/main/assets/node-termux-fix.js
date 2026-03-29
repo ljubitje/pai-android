@@ -9,6 +9,14 @@
 'use strict';
 const cp = require('child_process');
 const fs = require('fs');
+const dns = require('dns');
+
+// Android apps can't read /etc/resolv.conf — set DNS servers explicitly
+try {
+  dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1']);
+} catch (e) {
+  // Ignore — non-critical if DNS is already working
+}
 
 const correctShell = (function() {
   // Try PREFIX-based shell first

@@ -7,7 +7,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Color
+import android.net.Uri
 import android.os.Build
+import android.os.FileObserver
 import android.util.Log
 import android.os.Bundle
 import android.os.Environment
@@ -35,6 +37,7 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
     private var sessionRestartCount = 0
     private var lastSessionStart = 0L
     private var pendingCommand: String? = null
+    private var urlFileObserver: FileObserver? = null
 
     private val commandReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -90,6 +93,7 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         setContentView(layout)
 
         startTerminalSession()
+        startUrlFileObserver()
     }
 
     override fun onResume() {
@@ -102,6 +106,7 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
     override fun onDestroy() {
         super.onDestroy()
         unregisterReceiver(commandReceiver)
+        urlFileObserver?.stopWatching()
     }
 
     private fun setupFilesystem() {
@@ -111,6 +116,7 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         deployShellConfigs()
         migrateDpkgWrapper()
         deployNodeFix()
+        deployUrlOpener()
     }
 
     /** Upgrade dpkg wrapper to deb-patching version if stale. */
@@ -220,14 +226,62 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
     private fun deployNodeFix() {
         try {
             val dest = File("$PREFIX/lib", "node-termux-fix.js")
-            if (!dest.exists()) {
-                val content = assets.open("node-termux-fix.js").bufferedReader().use { it.readText() }
-                dest.writeText(content)
-                Log.i("MainActivity", "Deployed node-termux-fix.js")
-            }
+            val content = assets.open("node-termux-fix.js").bufferedReader().use { it.readText() }
+            // Always redeploy to pick up updates (e.g. DNS fix)
+            dest.writeText(content)
+            Log.i("MainActivity", "Deployed node-termux-fix.js")
         } catch (e: Exception) {
             Log.w("MainActivity", "Failed to deploy node-termux-fix.js: ${e.message}")
         }
+    }
+
+    /** Deploy xdg-open shim so CLI tools (e.g. Claude Code OAuth) can open URLs in a browser. */
+    private fun deployUrlOpener() {
+        try {
+            val content = assets.open("xdg-open.sh").bufferedReader().use { it.readText() }
+            // Deploy xdg-open — delete first in case it's a symlink (e.g. to termux-open)
+            for (name in listOf("xdg-open", "open", "termux-open", "termux-open-url")) {
+                val dest = File("$PREFIX/bin", name)
+                dest.delete()
+                dest.writeText(content)
+                dest.setExecutable(true, false)
+            }
+            Log.i("MainActivity", "Deployed URL opener shims")
+        } catch (e: Exception) {
+            Log.w("MainActivity", "Failed to deploy xdg-open: ${e.message}")
+        }
+    }
+
+    /** Watch $PREFIX/tmp/.open-url for URL open requests from shell scripts (e.g. xdg-open shim). */
+    private fun startUrlFileObserver() {
+        val urlFile = File("$PREFIX/tmp/.open-url")
+        val tmpDir = File("$PREFIX/tmp")
+        tmpDir.mkdirs()
+
+        urlFileObserver = object : FileObserver(tmpDir, CLOSE_WRITE or MOVED_TO) {
+            override fun onEvent(event: Int, path: String?) {
+                if (path != ".open-url") return
+                try {
+                    val url = urlFile.readText().trim()
+                    if (url.isNotEmpty()) {
+                        urlFile.delete()
+                        runOnUiThread {
+                            try {
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                startActivity(intent)
+                                Log.i("MainActivity", "Opened URL: $url")
+                            } catch (e: Exception) {
+                                Log.e("MainActivity", "Failed to open URL: $url — ${e.message}")
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("MainActivity", "Error reading URL file: ${e.message}")
+                }
+            }
+        }
+        urlFileObserver?.startWatching()
     }
 
     /** Deploy pai-setup script to $PREFIX/bin/. */

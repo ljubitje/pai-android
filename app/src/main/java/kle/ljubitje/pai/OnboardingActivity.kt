@@ -223,6 +223,7 @@ class OnboardingActivity : ComponentActivity() {
             File(it).mkdirs()
         }
         deployShellConfigs()
+        deployUrlOpener()
 
         if (BootstrapInstaller.isBootstrapped(prefix)) {
             markStep(setupSteps, 0, StepStatus.DONE)
@@ -561,10 +562,16 @@ class OnboardingActivity : ComponentActivity() {
         }
     }
 
+    private fun findShell(): String {
+        val candidates = listOf("$prefix/bin/bash", "$prefix/bin/sh", "/system/bin/sh")
+        return candidates.first { File(it).exists() }
+    }
+
     private fun buildShellEnv(): Array<String> = arrayOf(
         "HOME=$home",
         "PAI_DIR=$home/.claude",
         "PREFIX=$prefix",
+        "SHELL=${findShell()}",
         "TERM=dumb",
         "LANG=en_US.UTF-8",
         "BUN_INSTALL=$prefix",
@@ -673,6 +680,21 @@ class OnboardingActivity : ComponentActivity() {
             setupDest.setExecutable(true, false)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to deploy pai-setup: ${e.message}")
+        }
+    }
+
+    /** Deploy xdg-open shim so CLI tools can open URLs in a browser. */
+    private fun deployUrlOpener() {
+        try {
+            val content = assets.open("xdg-open.sh").bufferedReader().use { it.readText() }
+            for (name in listOf("xdg-open", "open", "termux-open", "termux-open-url")) {
+                val dest = File("$prefix/bin", name)
+                dest.delete()
+                dest.writeText(content)
+                dest.setExecutable(true, false)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to deploy xdg-open: ${e.message}")
         }
     }
 
