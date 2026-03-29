@@ -12,8 +12,53 @@ const fs = require('fs');
 const dns = require('dns');
 
 // Android apps can't read /etc/resolv.conf — set DNS servers explicitly
+// and override dns.lookup to use the JS resolver (which respects setServers)
+// instead of the OS getaddrinfo (which reads /etc/resolv.conf).
 try {
   dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1']);
+
+  const origLookup = dns.lookup;
+  dns.lookup = function(hostname, options, callback) {
+    // Normalize arguments (options is optional)
+    if (typeof options === 'function') {
+      callback = options;
+      options = {};
+    }
+    if (typeof options === 'number') {
+      options = { family: options };
+    }
+    options = options || {};
+
+    // For localhost / numeric IPs, use original
+    if (hostname === 'localhost' || /^\d+\.\d+\.\d+\.\d+$/.test(hostname) || hostname === '::1') {
+      return origLookup.call(dns, hostname, options, callback);
+    }
+
+    // Use dns.resolve4/resolve6 which go through the JS resolver
+    const family = options.family || 0;
+    if (family === 6) {
+      dns.resolve6(hostname, (err, addresses) => {
+        if (err) return callback(err);
+        callback(null, addresses[0], 6);
+      });
+    } else {
+      dns.resolve4(hostname, (err, addresses) => {
+        if (err) {
+          // Fall back to IPv6 if no family preference
+          if (family === 0) {
+            dns.resolve6(hostname, (err6, addr6) => {
+              if (err6) return callback(err);
+              callback(null, addr6[0], 6);
+            });
+          } else {
+            callback(err);
+          }
+        } else {
+          callback(null, addresses[0], 4);
+        }
+      });
+    }
+  };
 } catch (e) {
   // Ignore — non-critical if DNS is already working
 }
