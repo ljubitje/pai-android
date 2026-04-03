@@ -302,6 +302,7 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
     private fun startTerminalSession() {
         lastSessionStart = System.currentTimeMillis()
         val shell = findShell()
+        val dataHome = applicationContext.filesDir.absolutePath
         val env = arrayOf(
             "HOME=$HOME",
             "PAI_DIR=$HOME/.claude",
@@ -324,7 +325,22 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
             "GIT_EXEC_PATH=$PREFIX/libexec/git-core",
             "GIT_TEMPLATE_DIR=$PREFIX/share/git-core/templates",
             "GIT_SSL_CAINFO=$PREFIX/etc/tls/cert.pem",
-            "NODE_OPTIONS=--require=$PREFIX/lib/node-termux-fix.js"
+            "NODE_OPTIONS=--require=$PREFIX/lib/node-termux-fix.js",
+            // Redirect dot-folders from sdcard root to app data dir
+            "NPM_CONFIG_CACHE=$dataHome/.npm",
+            "NPM_CONFIG_USERCONFIG=$dataHome/.npmrc",
+            "XDG_CACHE_HOME=$dataHome/.cache",
+            "XDG_CONFIG_HOME=$dataHome/.config",
+            "XDG_DATA_HOME=$dataHome/.local/share",
+            "XDG_STATE_HOME=$dataHome/.local/state",
+            "HISTFILE=$dataHome/.bash_history",
+            "NODE_REPL_HISTORY=$dataHome/.node_repl_history",
+            "LESSHISTFILE=$dataHome/.lesshst",
+            "GIT_CONFIG_GLOBAL=$dataHome/.gitconfig",
+            "CURL_HOME=$dataHome",
+            "WGETHSTS=$dataHome/.wget-hsts",
+            "PYTHON_HISTORY=$dataHome/.python_history",
+            "SQLITE_HISTORY=$dataHome/.sqlite_history",
         )
 
         session = TerminalSession(

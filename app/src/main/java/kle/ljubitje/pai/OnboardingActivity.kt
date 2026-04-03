@@ -567,29 +567,47 @@ class OnboardingActivity : ComponentActivity() {
         return candidates.first { File(it).exists() }
     }
 
-    private fun buildShellEnv(): Array<String> = arrayOf(
-        "HOME=$home",
-        "PAI_DIR=$home/.claude",
-        "PREFIX=$prefix",
-        "SHELL=${findShell()}",
-        "TERM=dumb",
-        "LANG=en_US.UTF-8",
-        "BUN_INSTALL=$prefix",
-        "PATH=$prefix/bin:/system/bin:/system/xbin",
-        "TMPDIR=$prefix/tmp",
-        "LD_LIBRARY_PATH=$prefix/lib",
-        "TERMUX_APP_PACKAGE_MANAGER=apt",
-        "ANDROID_DATA=/data",
-        "ANDROID_ROOT=/system",
-        "APT_CONFIG=$prefix/etc/apt/apt.conf",
-        "CURL_CA_BUNDLE=$prefix/etc/tls/cert.pem",
-        "SSL_CERT_FILE=$prefix/etc/tls/cert.pem",
-        "GIT_EXEC_PATH=$prefix/libexec/git-core",
-        "GIT_TEMPLATE_DIR=$prefix/share/git-core/templates",
-        "GIT_SSL_CAINFO=$prefix/etc/tls/cert.pem",
-        "NODE_OPTIONS=--require=$prefix/lib/node-termux-fix.js",
-        "NODE_PATH=$prefix/lib/node_modules",
-    )
+    private fun buildShellEnv(): Array<String> {
+        val dataHome = applicationContext.filesDir.absolutePath
+        return arrayOf(
+            "HOME=$home",
+            "PAI_DIR=$home/.claude",
+            "PREFIX=$prefix",
+            "SHELL=${findShell()}",
+            "TERM=dumb",
+            "LANG=en_US.UTF-8",
+            "BUN_INSTALL=$prefix",
+            "PATH=$prefix/bin:/system/bin:/system/xbin",
+            "TMPDIR=$prefix/tmp",
+            "LD_LIBRARY_PATH=$prefix/lib",
+            "TERMUX_APP_PACKAGE_MANAGER=apt",
+            "ANDROID_DATA=/data",
+            "ANDROID_ROOT=/system",
+            "APT_CONFIG=$prefix/etc/apt/apt.conf",
+            "CURL_CA_BUNDLE=$prefix/etc/tls/cert.pem",
+            "SSL_CERT_FILE=$prefix/etc/tls/cert.pem",
+            "GIT_EXEC_PATH=$prefix/libexec/git-core",
+            "GIT_TEMPLATE_DIR=$prefix/share/git-core/templates",
+            "GIT_SSL_CAINFO=$prefix/etc/tls/cert.pem",
+            "NODE_OPTIONS=--require=$prefix/lib/node-termux-fix.js",
+            "NODE_PATH=$prefix/lib/node_modules",
+            // Redirect dot-folders from sdcard root to app data dir
+            "NPM_CONFIG_CACHE=$dataHome/.npm",
+            "NPM_CONFIG_USERCONFIG=$dataHome/.npmrc",
+            "XDG_CACHE_HOME=$dataHome/.cache",
+            "XDG_CONFIG_HOME=$dataHome/.config",
+            "XDG_DATA_HOME=$dataHome/.local/share",
+            "XDG_STATE_HOME=$dataHome/.local/state",
+            "HISTFILE=$dataHome/.bash_history",
+            "NODE_REPL_HISTORY=$dataHome/.node_repl_history",
+            "LESSHISTFILE=$dataHome/.lesshst",
+            "GIT_CONFIG_GLOBAL=$dataHome/.gitconfig",
+            "CURL_HOME=$dataHome",
+            "WGETHSTS=$dataHome/.wget-hsts",
+            "PYTHON_HISTORY=$dataHome/.python_history",
+            "SQLITE_HISTORY=$dataHome/.sqlite_history",
+        )
+    }
 
     private fun markStep(steps: MutableList<SetupStep>, index: Int, status: StepStatus) {
         if (index in steps.indices) {

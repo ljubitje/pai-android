@@ -28,12 +28,10 @@ export NODE_PATH="$PREFIX/lib/node_modules"
 export GIT_EXEC_PATH="$PREFIX/libexec/git-core"
 export GIT_TEMPLATE_DIR="$PREFIX/share/git-core/templates"
 export GIT_SSL_CAINFO="$PREFIX/etc/tls/cert.pem"
-[[ -d "$HOME/.local/bin" ]] && export PATH="$HOME/.local/bin:$PATH"
+[[ -d "${XDG_DATA_HOME:-$HOME/.local}/bin" ]] && export PATH="${XDG_DATA_HOME:-$HOME/.local}/bin:$PATH"
 # Bun (installed by PAI's install.sh into PREFIX for execute permission)
 export BUN_INSTALL="$PREFIX/bun"
 [[ -d "$BUN_INSTALL/bin" ]] && export PATH="$BUN_INSTALL/bin:$PATH"
-# Fallback: check HOME/.bun too
-[[ -d "$HOME/.bun/bin" ]] && export PATH="$HOME/.bun/bin:$PATH"
 
 # ── Aliases ──
 alias ls='ls --color=auto'
