@@ -76,6 +76,10 @@ class OnboardingActivity : ComponentActivity() {
         Environment.getExternalStorageDirectory().absolutePath
     }
 
+    private val dataHome: String by lazy {
+        applicationContext.filesDir.absolutePath
+    }
+
     // UI state
     private var currentScreen by mutableStateOf("permission") // permission, setup, install, ready
     private var setupProgress by mutableFloatStateOf(0f)
@@ -222,10 +226,14 @@ class OnboardingActivity : ComponentActivity() {
         listOf("$prefix/bin", "$prefix/lib", "$prefix/etc", "$prefix/tmp").forEach {
             File(it).mkdirs()
         }
+        // Deploy shell configs and URL opener to $HOME / $PREFIX/bin (not wiped by bootstrap)
         deployShellConfigs()
         deployUrlOpener()
 
         if (BootstrapInstaller.isBootstrapped(prefix)) {
+            // Safe to deploy into $PREFIX now — bootstrap won't overwrite
+            deployNodeFix()
+            deployResolvConf()
             markStep(setupSteps, 0, StepStatus.DONE)
             markStep(setupSteps, 1, StepStatus.DONE)
             appendLog("Base system already installed.")
@@ -269,6 +277,9 @@ class OnboardingActivity : ComponentActivity() {
                     if (success) {
                         markStep(setupSteps, 0, StepStatus.DONE)
                         markStep(setupSteps, 1, StepStatus.DONE)
+                        // Deploy into $PREFIX now that bootstrap is done
+                        deployNodeFix()
+                        deployResolvConf()
                         deployPaiSetup()
                         runPostBootstrapSetup()
                     } else {
@@ -296,7 +307,6 @@ class OnboardingActivity : ComponentActivity() {
                     setupProgress = 0.6f
                 }
 
-                deployNodeFix()
                 appendLog("$ apt install -y git proot openssh unzip")
                 val aptExitCode = runShellCommand("apt install -y git proot openssh unzip 2>&1") { line ->
                     appendLog(line)
@@ -340,8 +350,23 @@ class OnboardingActivity : ComponentActivity() {
                 }
 
                 appendLog("Generating SSH keys...")
-                runShellCommand("mkdir -p ~/.ssh && [ -f ~/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N '' 2>&1") { line ->
+                runShellCommand("mkdir -p '$dataHome/.ssh' && chmod 700 '$dataHome/.ssh' && [ -f '$dataHome/.ssh/id_ed25519' ] || ssh-keygen -t ed25519 -f '$dataHome/.ssh/id_ed25519' -N '' 2>&1") { line ->
                     appendLog(line)
+                }
+                // Migrate old .ssh from sdcard root if it exists
+                val oldSshDir = File(home, ".ssh")
+                if (oldSshDir.exists() && oldSshDir.isDirectory) {
+                    appendLog("Migrating .ssh from sdcard to internal storage...")
+                    try {
+                        val newSshDir = File(dataHome, ".ssh")
+                        oldSshDir.listFiles()?.forEach { file ->
+                            val dest = File(newSshDir, file.name)
+                            if (!dest.exists()) file.copyTo(dest, overwrite = false)
+                        }
+                        oldSshDir.deleteRecursively()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "SSH migration failed: ${e.message}")
+                    }
                 }
 
                 File("$prefix/etc/profile.d/pai-first-run.sh").delete()
@@ -432,7 +457,7 @@ class OnboardingActivity : ComponentActivity() {
                     installProgress = 0.5f
                 }
 
-                // Step 3: Clone PAI repo (full clone)
+                // Step 3: Clone PAI repo (shallow clone — repo is large)
                 runOnUiThread { markStep(installSteps, 2, StepStatus.ACTIVE) }
 
                 val paiRepo = "$prefix/tmp/pai-repo"
@@ -445,13 +470,20 @@ class OnboardingActivity : ComponentActivity() {
                         appendInstallLog(line)
                     }
                 } else {
-                    appendInstallLog("$ git clone PAI repository")
+                    appendInstallLog("$ git clone PAI repository (sparse)")
                     runShellCommand("""
                         rm -rf '$paiRepo'
-                        git clone 'https://github.com/danielmiessler/Personal_AI_Infrastructure.git' '$paiRepo' 2>&1
+                        git clone --depth 1 --filter=blob:none --sparse 'https://github.com/danielmiessler/Personal_AI_Infrastructure.git' '$paiRepo' 2>&1
                     """.trimIndent()) { line ->
                         appendInstallLog(line)
-                        runOnUiThread { if (installProgress < 0.85f) installProgress += 0.003f }
+                        runOnUiThread { if (installProgress < 0.7f) installProgress += 0.003f }
+                    }
+                    appendInstallLog("$ git sparse-checkout set Releases/v4.0.3/.claude")
+                    runShellCommand("""
+                        git -C '$paiRepo' sparse-checkout set 'Releases/v4.0.3/.claude' 2>&1
+                    """.trimIndent()) { line ->
+                        appendInstallLog(line)
+                        runOnUiThread { if (installProgress < 0.85f) installProgress += 0.005f }
                     }
                 }
 
@@ -484,6 +516,20 @@ class OnboardingActivity : ComponentActivity() {
                     runShellCommand("cp '$home/.claude/PAI/SKILL.md' '$home/.claude/skills/PAI/SKILL.md' 2>&1") { line ->
                         appendInstallLog(line)
                     }
+                }
+
+                // Patch upstream installer: hardcoded .zshrc → detect shell from $SHELL
+                // (ports pai-fork commits 6158ffd and 13983e3)
+                try {
+                    val patchScript = File("$prefix/tmp", "patch-installer.sh")
+                    val content = assets.open("patch-installer.sh").bufferedReader().use { it.readText() }
+                    patchScript.writeText(content)
+                    patchScript.setExecutable(true, false)
+                    runShellCommand("'$prefix/tmp/patch-installer.sh' '$home/.claude' 2>&1") { line ->
+                        appendInstallLog(line)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to patch installer: ${e.message}")
                 }
 
                 runOnUiThread {
@@ -568,10 +614,10 @@ class OnboardingActivity : ComponentActivity() {
     }
 
     private fun buildShellEnv(): Array<String> {
-        val dataHome = applicationContext.filesDir.absolutePath
         return arrayOf(
             "HOME=$home",
             "PAI_DIR=$home/.claude",
+            "PAI_DATA_HOME=$dataHome",
             "PREFIX=$prefix",
             "SHELL=${findShell()}",
             "TERM=dumb",
@@ -589,6 +635,7 @@ class OnboardingActivity : ComponentActivity() {
             "GIT_EXEC_PATH=$prefix/libexec/git-core",
             "GIT_TEMPLATE_DIR=$prefix/share/git-core/templates",
             "GIT_SSL_CAINFO=$prefix/etc/tls/cert.pem",
+            "GIT_SSH_COMMAND=ssh -i $dataHome/.ssh/id_ed25519 -o UserKnownHostsFile=$dataHome/.ssh/known_hosts -o StrictHostKeyChecking=accept-new",
             "NODE_OPTIONS=--require=$prefix/lib/node-termux-fix.js",
             "NODE_PATH=$prefix/lib/node_modules",
             // Redirect dot-folders from sdcard root to app data dir
@@ -621,7 +668,7 @@ class OnboardingActivity : ComponentActivity() {
 
     private fun deployShellConfigs() {
         mapOf("bashrc" to ".bashrc", "profile" to ".profile").forEach { (asset, filename) ->
-            val dest = File(home, filename)
+            val dest = File(dataHome, filename)
             try {
                 val bundled = assets.open(asset).bufferedReader().use { it.readText() }
                 if (dest.exists()) {
@@ -634,6 +681,43 @@ class OnboardingActivity : ComponentActivity() {
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to deploy $filename: ${e.message}")
             }
+        }
+        // Remove old copies from sdcard root (migration from pre-v7)
+        listOf(".bashrc", ".profile").forEach { filename ->
+            val old = File(home, filename)
+            if (old.exists()) {
+                try { old.delete() } catch (_: Exception) {}
+            }
+        }
+        // Deploy profile.d script so login shell sources configs from internal storage
+        deployProfileDScript()
+    }
+
+    /** Ensure /etc/profile sources .bashrc/.profile from app internal storage. */
+    private fun deployProfileDScript() {
+        try {
+            // Deploy profile.d script
+            val profileDir = File("$prefix/etc/profile.d")
+            profileDir.mkdirs()
+            val dest = File(profileDir, "pai-user.sh")
+            val scriptContent = """
+                # Source PAI user configs from app internal storage
+                if [ -n "${'$'}PAI_DATA_HOME" ]; then
+                    [ -f "${'$'}PAI_DATA_HOME/.profile" ] && . "${'$'}PAI_DATA_HOME/.profile"
+                    [ -f "${'$'}PAI_DATA_HOME/.bashrc" ] && . "${'$'}PAI_DATA_HOME/.bashrc"
+                fi
+            """.trimIndent() + "\n"
+            if (!dest.exists()) dest.writeText(scriptContent)
+
+            // Ensure /etc/profile sources profile.d scripts (Termux's may not)
+            val profile = File("$prefix/etc/profile")
+            val marker = "# PAI: source profile.d"
+            if (profile.exists() && !profile.readText().contains(marker)) {
+                profile.appendText("\n$marker\nfor _f in ${'$'}PREFIX/etc/profile.d/*.sh; do [ -r \"${'$'}_f\" ] && . \"${'$'}_f\"; done\nunset _f\n")
+            }
+            Log.i(TAG, "Deployed profile.d sourcing")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to deploy profile.d: ${e.message}")
         }
     }
 
@@ -653,6 +737,19 @@ class OnboardingActivity : ComponentActivity() {
             Log.i(TAG, "Deployed node-termux-fix.js")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to deploy node-termux-fix.js: ${e.message}")
+        }
+    }
+
+    /** Create resolv.conf so c-ares (used by Node.js) can find DNS servers. */
+    private fun deployResolvConf() {
+        try {
+            val dest = File("$prefix/etc", "resolv.conf")
+            if (dest.exists()) return
+            File("$prefix/etc").mkdirs()
+            dest.writeText("nameserver 8.8.8.8\nnameserver 8.8.4.4\nnameserver 1.1.1.1\n")
+            Log.i(TAG, "Deployed resolv.conf")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to deploy resolv.conf: ${e.message}")
         }
     }
 
@@ -765,7 +862,7 @@ fun PermissionScreen(onGrantAccess: () -> Unit) {
         Spacer(Modifier.height(16.dp))
 
         Text(
-            text = "PAI needs access to your device storage to set up the development environment and manage project files.",
+            text = "PAI needs full storage access so Claude Code can read and edit your project files anywhere on the device — just like it would on a desktop.",
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,

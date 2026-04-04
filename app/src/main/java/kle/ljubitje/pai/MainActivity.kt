@@ -116,6 +116,7 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         deployShellConfigs()
         migrateDpkgWrapper()
         deployNodeFix()
+        deployResolvConf()
         deployUrlOpener()
     }
 
@@ -201,10 +202,11 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         }
     }
 
-    /** Deploy shell config files to HOME, updating stale versions. */
+    /** Deploy shell config files to app internal data, updating stale versions. */
     private fun deployShellConfigs() {
+        val dataHome = applicationContext.filesDir.absolutePath
         mapOf("bashrc" to ".bashrc", "profile" to ".profile").forEach { (asset, filename) ->
-            val dest = File(HOME, filename)
+            val dest = File(dataHome, filename)
             try {
                 val bundled = assets.open(asset).bufferedReader().use { it.readText() }
                 if (dest.exists()) {
@@ -218,8 +220,42 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
                 Log.w("MainActivity", "Failed to deploy $filename: ${e.message}")
             }
         }
-
+        // Remove old copies from sdcard root (migration from pre-v7)
+        listOf(".bashrc", ".profile").forEach { filename ->
+            val old = File(HOME, filename)
+            if (old.exists()) {
+                try { old.delete() } catch (_: Exception) {}
+            }
+        }
+        // Deploy profile.d script so login shell sources configs from internal storage
+        deployProfileDScript()
         deployPaiSetup()
+    }
+
+    /** Ensure /etc/profile sources .bashrc/.profile from app internal storage. */
+    private fun deployProfileDScript() {
+        try {
+            val profileDir = File("$PREFIX/etc/profile.d")
+            profileDir.mkdirs()
+            val dest = File(profileDir, "pai-user.sh")
+            val scriptContent = """
+                # Source PAI user configs from app internal storage
+                if [ -n "${'$'}PAI_DATA_HOME" ]; then
+                    [ -f "${'$'}PAI_DATA_HOME/.profile" ] && . "${'$'}PAI_DATA_HOME/.profile"
+                    [ -f "${'$'}PAI_DATA_HOME/.bashrc" ] && . "${'$'}PAI_DATA_HOME/.bashrc"
+                fi
+            """.trimIndent() + "\n"
+            if (!dest.exists()) dest.writeText(scriptContent)
+
+            // Ensure /etc/profile sources profile.d scripts (Termux's may not)
+            val profile = File("$PREFIX/etc/profile")
+            val marker = "# PAI: source profile.d"
+            if (profile.exists() && !profile.readText().contains(marker)) {
+                profile.appendText("\n$marker\nfor _f in ${'$'}PREFIX/etc/profile.d/*.sh; do [ -r \"${'$'}_f\" ] && . \"${'$'}_f\"; done\nunset _f\n")
+            }
+        } catch (e: Exception) {
+            Log.w("MainActivity", "Failed to deploy profile.d: ${e.message}")
+        }
     }
 
     /** Deploy Node.js preload fix for com.termux hardcoded paths. */
@@ -232,6 +268,17 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
             Log.i("MainActivity", "Deployed node-termux-fix.js")
         } catch (e: Exception) {
             Log.w("MainActivity", "Failed to deploy node-termux-fix.js: ${e.message}")
+        }
+    }
+
+    /** Create resolv.conf so c-ares (used by Node.js) can find DNS servers. */
+    private fun deployResolvConf() {
+        try {
+            val dest = File("$PREFIX/etc", "resolv.conf")
+            if (dest.exists()) return
+            dest.writeText("nameserver 8.8.8.8\nnameserver 8.8.4.4\nnameserver 1.1.1.1\n")
+        } catch (e: Exception) {
+            Log.w("MainActivity", "Failed to deploy resolv.conf: ${e.message}")
         }
     }
 
@@ -306,6 +353,7 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
         val env = arrayOf(
             "HOME=$HOME",
             "PAI_DIR=$HOME/.claude",
+            "PAI_DATA_HOME=$dataHome",
             "PREFIX=$PREFIX",
             "SHELL=$shell",
             "TERM=xterm-256color",
@@ -325,6 +373,7 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
             "GIT_EXEC_PATH=$PREFIX/libexec/git-core",
             "GIT_TEMPLATE_DIR=$PREFIX/share/git-core/templates",
             "GIT_SSL_CAINFO=$PREFIX/etc/tls/cert.pem",
+            "GIT_SSH_COMMAND=ssh -i $dataHome/.ssh/id_ed25519 -o UserKnownHostsFile=$dataHome/.ssh/known_hosts -o StrictHostKeyChecking=accept-new",
             "NODE_OPTIONS=--require=$PREFIX/lib/node-termux-fix.js",
             // Redirect dot-folders from sdcard root to app data dir
             "NPM_CONFIG_CACHE=$dataHome/.npm",
