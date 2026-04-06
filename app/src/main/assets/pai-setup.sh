@@ -104,8 +104,21 @@ fi
 
 success "PAI repository ready."
 
+# ── Deploy to ~/.claude (excluding settings.json for fresh-install detection) ──
+info "Deploying PAI release to ~/.claude..."
+rm -rf "$HOME/.claude"
+cp -r "$PAI_CLAUDE_DIR" "$HOME/.claude"
+rm -f "$HOME/.claude/settings.json"
+success "PAI deployed to ~/.claude"
+
+# ── Patch installer for Android/bash compatibility ──
+PATCH_DIR="$TMPDIR/pai-patches"
+if [ -d "$PATCH_DIR" ] && [ -f "$TMPDIR/patch-installer.sh" ]; then
+    sh "$TMPDIR/patch-installer.sh" "$HOME/.claude" "$PATCH_DIR"
+fi
+
 # ── Run the PAI installer in CLI mode ──
 info "Launching PAI installer (CLI mode via Node.js)..."
 echo ""
-cd "$PAI_CLAUDE_DIR"
+cd "$HOME/.claude"
 exec tsx PAI-Install/main.ts --mode cli

@@ -1,10 +1,12 @@
 package kle.ljubitje.pai
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -81,7 +83,7 @@ class OnboardingActivity : ComponentActivity() {
     }
 
     // UI state
-    private var currentScreen by mutableStateOf("permission") // permission, setup, install, ready
+    private var currentScreen by mutableStateOf("permission") // permission, battery, setup, install, ready
     private var setupProgress by mutableFloatStateOf(0f)
     private var setupError by mutableStateOf<String?>(null)
     private var currentStepIndex by mutableIntStateOf(0)
@@ -103,25 +105,24 @@ class OnboardingActivity : ComponentActivity() {
         SetupStep("Installing Node.js", StepStatus.PENDING),
         SetupStep("Installing Claude Code", StepStatus.PENDING),
         SetupStep("Cloning PAI repository", StepStatus.PENDING),
+        SetupStep("Deploying PAI", StepStatus.PENDING),
     )
     private val installLogLines = mutableStateListOf<String>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Already bootstrapped + has permission → check if PAI is installed
-        if (hasStoragePermission() && BootstrapInstaller.isBootstrapped(prefix)) {
-            if (isPaiInstalled()) {
+        // Permissions gate: storage first, then battery, then proceed
+        currentScreen = when {
+            !hasStoragePermission() -> "permission"
+            isBatteryOptimized() -> "battery"
+            // Both permissions handled — determine next step
+            BootstrapInstaller.isBootstrapped(prefix) && isPaiInstalled() -> {
                 launchTerminal()
                 return
             }
-            // Bootstrap done but PAI not installed → show ready screen
-            currentScreen = "ready"
-        }
-
-        // Has permission but not bootstrapped → skip to setup
-        if (hasStoragePermission() && currentScreen == "permission") {
-            currentScreen = "setup"
+            BootstrapInstaller.isBootstrapped(prefix) -> "ready"
+            else -> "setup"
         }
 
         setContent {
@@ -138,6 +139,10 @@ class OnboardingActivity : ComponentActivity() {
                     ) { screen ->
                         when (screen) {
                             "permission" -> PermissionScreen(onGrantAccess = ::requestStoragePermission)
+                            "battery" -> BatteryScreen(
+                                onDisable = ::requestBatteryOptimizationExemption,
+                                onSkip = ::advancePastBattery,
+                            )
                             "setup" -> ProgressScreen(
                                 title = "Setting up PAI",
                                 subtitle = "This may take a few minutes",
@@ -172,9 +177,12 @@ class OnboardingActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Advance through permission gates as each is granted
         if (currentScreen == "permission" && hasStoragePermission()) {
-            currentScreen = "setup"
-            startSetup()
+            currentScreen = if (isBatteryOptimized()) "battery" else "setup"
+            if (currentScreen == "setup") startSetup()
+        } else if (currentScreen == "battery" && !isBatteryOptimized()) {
+            advancePastBattery()
         }
     }
 
@@ -197,6 +205,32 @@ class OnboardingActivity : ComponentActivity() {
             intent.data = Uri.parse("package:$packageName")
             startActivity(intent)
         }
+    }
+
+    /** Advance past battery screen to the appropriate next step. */
+    private fun advancePastBattery() {
+        currentScreen = when {
+            BootstrapInstaller.isBootstrapped(prefix) && isPaiInstalled() -> {
+                launchTerminal()
+                return
+            }
+            BootstrapInstaller.isBootstrapped(prefix) -> "ready"
+            else -> "setup"
+        }
+        if (currentScreen == "setup") startSetup()
+    }
+
+    /** Returns true if the app is subject to battery optimization (i.e. NOT exempt). */
+    private fun isBatteryOptimized(): Boolean {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        return !pm.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    @Suppress("BatteryLife") // We have a legitimate reason: long-running AI tasks
+    private fun requestBatteryOptimizationExemption() {
+        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+        intent.data = Uri.parse("package:$packageName")
+        startActivity(intent)
     }
 
     private fun appendLog(line: String) {
@@ -495,14 +529,36 @@ class OnboardingActivity : ComponentActivity() {
                     installProgress = 0.85f
                 }
 
+                // Step 4: Deploy release to ~/.claude
+                runOnUiThread { markStep(installSteps, 3, StepStatus.ACTIVE) }
+
+                // Copy release excluding settings.json so the
+                // installer's detection sees a fresh install, not an upgrade.
+                // The installer's Configuration step will generate settings.json.
+                appendInstallLog("$ deploy .claude → ~/")
+                runShellCommand("rm -rf '$home/.claude' && cp -r '$paiClaudeDir' '$home/.claude' && rm -f '$home/.claude/settings.json' 2>&1") { line ->
+                    appendInstallLog(line)
+                }
+
+                if (!File("$home/.claude/install.sh").exists()) {
+                    throw RuntimeException("Failed to deploy PAI release to $home/.claude")
+                }
+
                 // Patch upstream installer: hardcoded .zshrc → detect shell from $SHELL
                 // (ports pai-fork commits 6158ffd and 13983e3)
                 try {
+                    val patchDir = File("$prefix/tmp/pai-patches")
+                    patchDir.mkdirs()
+                    // Deploy patch script and patched files
                     val patchScript = File("$prefix/tmp", "patch-installer.sh")
-                    val content = assets.open("patch-installer.sh").bufferedReader().use { it.readText() }
-                    patchScript.writeText(content)
+                    patchScript.writeText(assets.open("patch-installer.sh").bufferedReader().use { it.readText() })
                     patchScript.setExecutable(true, false)
-                    runShellCommand("'$prefix/tmp/patch-installer.sh' '$paiClaudeDir' 2>&1") { line ->
+                    for (name in listOf("validate.ts", "types.ts", "display.ts", "index.ts", "pai.ts")) {
+                        File(patchDir, name).writeText(
+                            assets.open("pai-installer-patches/$name").bufferedReader().use { it.readText() }
+                        )
+                    }
+                    runShellCommand("'$prefix/tmp/patch-installer.sh' '$home/.claude' '$prefix/tmp/pai-patches' 2>&1") { line ->
                         appendInstallLog(line)
                     }
                 } catch (e: Exception) {
@@ -510,6 +566,7 @@ class OnboardingActivity : ComponentActivity() {
                 }
 
                 runOnUiThread {
+                    markStep(installSteps, 3, StepStatus.DONE)
                     installProgress = 1f
                     appendInstallLog("")
                     appendInstallLog("Launching PAI installer...")
@@ -522,7 +579,7 @@ class OnboardingActivity : ComponentActivity() {
                     val intent = Intent(this@OnboardingActivity, MainActivity::class.java)
                     intent.putExtra(
                         MainActivity.EXTRA_RUN_COMMAND,
-                        "cd '$paiClaudeDir' && tsx PAI-Install/main.ts --mode cli"
+                        "(cd '$home/.claude' && tsx PAI-Install/main.ts --mode cli)"
                     )
                     startActivity(intent)
                     finish()
@@ -891,7 +948,100 @@ fun PermissionScreen(onGrantAccess: () -> Unit) {
         Spacer(Modifier.weight(1f))
 
         Text(
-            text = "No data leaves your device without your permission.",
+            text = "This app does not collect or transmit any data on its own.\nNetwork access is used only when you instruct PAI or Claude.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+@Composable
+fun BatteryScreen(
+    onDisable: () -> Unit,
+    onSkip: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 32.dp, vertical = 48.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            text = "PAI",
+            style = MaterialTheme.typography.displayLarge,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold,
+        )
+        Text(
+            text = "Personal AI Infrastructure",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Spacer(Modifier.height(48.dp))
+
+        Text(
+            text = "Background Tasks",
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.onBackground,
+        )
+
+        Spacer(Modifier.height(16.dp))
+
+        Text(
+            text = "PAI runs AI tasks that can take minutes or longer. Android may kill background processes to save battery, interrupting your work.\n\nDisabling battery optimization for this app prevents that.",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            lineHeight = 24.sp,
+        )
+
+        Spacer(Modifier.height(48.dp))
+
+        Button(
+            onClick = onDisable,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = Color.White
+            )
+        ) {
+            Text(
+                text = "Disable Battery Restrictions",
+                style = MaterialTheme.typography.labelLarge,
+                fontSize = 18.sp,
+            )
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        Button(
+            onClick = onSkip,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        ) {
+            Text(
+                text = "Keep Current Settings",
+                style = MaterialTheme.typography.labelLarge,
+                fontSize = 18.sp,
+            )
+        }
+
+        Spacer(Modifier.weight(1f))
+
+        Text(
+            text = "You can change this later in Android Settings.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
             textAlign = TextAlign.Center,
