@@ -220,16 +220,39 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
                 Log.w("MainActivity", "Failed to deploy $filename: ${e.message}")
             }
         }
-        // Remove old copies from sdcard root (migration from pre-v7)
-        listOf(".bashrc", ".profile").forEach { filename ->
-            val old = File(HOME, filename)
-            if (old.exists()) {
-                try { old.delete() } catch (_: Exception) {}
-            }
-        }
+        // Deploy thin wrapper dotfiles to $HOME (sdcard) so bash can find them.
+        // Termux bash has /data/data/com.termux/... compiled in as /etc/profile path,
+        // which doesn't exist under our package name, so bash never sources /etc/profile.
+        // These wrappers redirect to the full configs in internal storage ($PAI_DATA_HOME).
+        deployHomeDotfiles()
         // Deploy profile.d script so login shell sources configs from internal storage
         deployProfileDScript()
         deployPaiSetup()
+    }
+
+    /** Deploy thin wrapper dotfiles to $HOME so bash login/non-login shells find them. */
+    private fun deployHomeDotfiles() {
+        val wrapper = """
+            # PAI — source configs from internal storage (v1)
+            [ -n "${'$'}PAI_DATA_HOME" ] && [ -f "${'$'}PAI_DATA_HOME/.bashrc" ] && . "${'$'}PAI_DATA_HOME/.bashrc"
+        """.trimIndent() + "\n"
+        // .bash_profile for login shells (bash checks this before .profile)
+        try {
+            File(HOME, ".bash_profile").writeText(wrapper)
+        } catch (e: Exception) {
+            Log.w("MainActivity", "Failed to deploy .bash_profile: ${e.message}")
+        }
+        // .bashrc for interactive non-login shells (e.g. running 'bash' inside terminal)
+        try {
+            File(HOME, ".bashrc").writeText(wrapper)
+        } catch (e: Exception) {
+            Log.w("MainActivity", "Failed to deploy .bashrc: ${e.message}")
+        }
+        // Clean up old full-size .profile from sdcard (superseded by .bash_profile wrapper)
+        try {
+            val oldProfile = File(HOME, ".profile")
+            if (oldProfile.exists()) oldProfile.delete()
+        } catch (_: Exception) {}
     }
 
     /** Ensure /etc/profile sources .bashrc/.profile from app internal storage. */

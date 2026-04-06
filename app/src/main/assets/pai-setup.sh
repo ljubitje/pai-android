@@ -91,7 +91,7 @@ if [ -d "$PAI_CLAUDE_DIR/PAI-Install" ]; then
 else
     info "Cloning PAI repository (sparse)..."
     rm -rf "$PAI_REPO"
-    git clone --depth 1 --filter=blob:none --sparse \
+    git clone --depth 1 --sparse \
         "https://github.com/danielmiessler/Personal_AI_Infrastructure.git" \
         "$PAI_REPO"
     git -C "$PAI_REPO" sparse-checkout set "Releases/v4.0.3/.claude"

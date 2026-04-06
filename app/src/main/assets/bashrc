@@ -1,4 +1,4 @@
-# PAI Android — user .bashrc (v7)
+# PAI Android — user .bashrc (v8)
 # Sourced by bash for interactive non-login shells,
 # and by /etc/profile for interactive login shells.
 
@@ -52,7 +52,5 @@ alias search='pkg search'
 # PAI CLI alias
 alias pai='bun "$HOME/.claude/PAI/Tools/pai.ts"'
 
-# Claude Code wrapper (bind-mount /tmp for Claude Code compatibility)
-if command -v proot &>/dev/null && command -v claude &>/dev/null; then
-    alias claude='proot -b "$PREFIX/tmp:/tmp" claude'
-fi
+# Claude Code: TMPDIR is set by the app environment, so /tmp binding not needed.
+# If a tool requires /tmp specifically, use: proot -b "$PREFIX/tmp:/tmp" <command>

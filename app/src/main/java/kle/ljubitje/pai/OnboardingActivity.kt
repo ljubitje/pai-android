@@ -103,7 +103,6 @@ class OnboardingActivity : ComponentActivity() {
         SetupStep("Installing Node.js", StepStatus.PENDING),
         SetupStep("Installing Claude Code", StepStatus.PENDING),
         SetupStep("Cloning PAI repository", StepStatus.PENDING),
-        SetupStep("Deploying PAI", StepStatus.PENDING),
     )
     private val installLogLines = mutableStateListOf<String>()
 
@@ -473,7 +472,7 @@ class OnboardingActivity : ComponentActivity() {
                     appendInstallLog("$ git clone PAI repository (sparse)")
                     runShellCommand("""
                         rm -rf '$paiRepo'
-                        git clone --depth 1 --filter=blob:none --sparse 'https://github.com/danielmiessler/Personal_AI_Infrastructure.git' '$paiRepo' 2>&1
+                        git clone --depth 1 --sparse 'https://github.com/danielmiessler/Personal_AI_Infrastructure.git' '$paiRepo' 2>&1
                     """.trimIndent()) { line ->
                         appendInstallLog(line)
                         runOnUiThread { if (installProgress < 0.7f) installProgress += 0.003f }
@@ -496,28 +495,6 @@ class OnboardingActivity : ComponentActivity() {
                     installProgress = 0.85f
                 }
 
-                // Step 4: Copy .claude release to home directory
-                runOnUiThread { markStep(installSteps, 3, StepStatus.ACTIVE) }
-
-                appendInstallLog("$ cp -r .claude ~/")
-                runShellCommand("rm -rf '$home/.claude' && cp -r '$paiClaudeDir' '$home/.claude' 2>&1") { line ->
-                    appendInstallLog(line)
-                }
-
-                if (!File("$home/.claude/install.sh").exists()) {
-                    throw RuntimeException("Failed to copy PAI release to $home/.claude")
-                }
-
-                // Link PAI core skill into skills directory (validation expects skills/PAI/SKILL.md)
-                val skillsDir = File("$home/.claude/skills/PAI")
-                if (!skillsDir.exists() && File("$home/.claude/PAI/SKILL.md").exists()) {
-                    appendInstallLog("Linking PAI core skill...")
-                    skillsDir.mkdirs()
-                    runShellCommand("cp '$home/.claude/PAI/SKILL.md' '$home/.claude/skills/PAI/SKILL.md' 2>&1") { line ->
-                        appendInstallLog(line)
-                    }
-                }
-
                 // Patch upstream installer: hardcoded .zshrc → detect shell from $SHELL
                 // (ports pai-fork commits 6158ffd and 13983e3)
                 try {
@@ -525,7 +502,7 @@ class OnboardingActivity : ComponentActivity() {
                     val content = assets.open("patch-installer.sh").bufferedReader().use { it.readText() }
                     patchScript.writeText(content)
                     patchScript.setExecutable(true, false)
-                    runShellCommand("'$prefix/tmp/patch-installer.sh' '$home/.claude' 2>&1") { line ->
+                    runShellCommand("'$prefix/tmp/patch-installer.sh' '$paiClaudeDir' 2>&1") { line ->
                         appendInstallLog(line)
                     }
                 } catch (e: Exception) {
@@ -533,10 +510,9 @@ class OnboardingActivity : ComponentActivity() {
                 }
 
                 runOnUiThread {
-                    markStep(installSteps, 3, StepStatus.DONE)
                     installProgress = 1f
                     appendInstallLog("")
-                    appendInstallLog("PAI deployed! Launching installer...")
+                    appendInstallLog("Launching PAI installer...")
                 }
 
                 // Brief pause then launch terminal with PAI installer via tsx
@@ -546,7 +522,7 @@ class OnboardingActivity : ComponentActivity() {
                     val intent = Intent(this@OnboardingActivity, MainActivity::class.java)
                     intent.putExtra(
                         MainActivity.EXTRA_RUN_COMMAND,
-                        "cd '$home/.claude' && tsx PAI-Install/main.ts --mode cli"
+                        "cd '$paiClaudeDir' && tsx PAI-Install/main.ts --mode cli"
                     )
                     startActivity(intent)
                     finish()
@@ -682,15 +658,38 @@ class OnboardingActivity : ComponentActivity() {
                 Log.w(TAG, "Failed to deploy $filename: ${e.message}")
             }
         }
-        // Remove old copies from sdcard root (migration from pre-v7)
-        listOf(".bashrc", ".profile").forEach { filename ->
-            val old = File(home, filename)
-            if (old.exists()) {
-                try { old.delete() } catch (_: Exception) {}
-            }
-        }
+        // Deploy thin wrapper dotfiles to $HOME (sdcard) so bash can find them.
+        // Termux bash has /data/data/com.termux/... compiled in as /etc/profile path,
+        // which doesn't exist under our package name, so bash never sources /etc/profile.
+        // These wrappers redirect to the full configs in internal storage ($PAI_DATA_HOME).
+        deployHomeDotfiles()
         // Deploy profile.d script so login shell sources configs from internal storage
         deployProfileDScript()
+    }
+
+    /** Deploy thin wrapper dotfiles to $HOME so bash login/non-login shells find them. */
+    private fun deployHomeDotfiles() {
+        val wrapper = """
+            # PAI — source configs from internal storage (v1)
+            [ -n "${'$'}PAI_DATA_HOME" ] && [ -f "${'$'}PAI_DATA_HOME/.bashrc" ] && . "${'$'}PAI_DATA_HOME/.bashrc"
+        """.trimIndent() + "\n"
+        // .bash_profile for login shells (bash checks this before .profile)
+        try {
+            File(home, ".bash_profile").writeText(wrapper)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to deploy .bash_profile: ${e.message}")
+        }
+        // .bashrc for interactive non-login shells (e.g. running 'bash' inside terminal)
+        try {
+            File(home, ".bashrc").writeText(wrapper)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to deploy .bashrc: ${e.message}")
+        }
+        // Clean up old full-size .profile from sdcard (superseded by .bash_profile wrapper)
+        try {
+            val oldProfile = File(home, ".profile")
+            if (oldProfile.exists()) oldProfile.delete()
+        } catch (_: Exception) {}
     }
 
     /** Ensure /etc/profile sources .bashrc/.profile from app internal storage. */
