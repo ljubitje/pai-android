@@ -120,5 +120,4 @@ fi
 # ── Run the PAI installer in CLI mode ──
 info "Launching PAI installer (CLI mode via Node.js)..."
 echo ""
-cd "$HOME/.claude"
-exec tsx PAI-Install/main.ts --mode cli
+exec tsx "$HOME/.claude/PAI-Install/main.ts" --mode cli

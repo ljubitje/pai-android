@@ -91,7 +91,10 @@ class ExtraKeysView(
             imeOptions = EditorInfo.IME_FLAG_NO_ENTER_ACTION
             isSingleLine = false
 
-            // When field is empty, Enter sends CR to terminal (accept defaults in TUI apps)
+            // Block IME "done/send" action — Enter always inserts newline
+            setOnEditorActionListener { _, _, _ -> true }
+
+            // Hardware Enter on empty field sends CR to terminal (accept defaults in TUI apps)
             setOnKeyListener { _, keyCode, event ->
                 if (keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN) {
                     if (text.isNullOrEmpty()) {

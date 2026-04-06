@@ -415,7 +415,7 @@ async function cmdLaunch(options: { mcp?: string; resume?: boolean; skipPerms?: 
   // Change to PAI directory unless --local flag is set.
   // On Android, stay in $HOME (sdcard root) — .claude is infrastructure, not a workspace.
   if (!options.local) {
-    const isAndroid = process.platform === "linux" && existsSync("/system/build.prop");
+    const isAndroid = process.env.TERMUX_VERSION === "PAI";
     process.chdir(isAndroid ? homedir() : CLAUDE_DIR);
   }
 
