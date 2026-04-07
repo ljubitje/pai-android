@@ -500,17 +500,29 @@ class BootstrapInstaller(
         val adminSymlink = File(instVarLib, "dpkg")
         if (!adminSymlink.exists()) createSymlink("$p/var/lib/dpkg", adminSymlink.absolutePath)
 
-        // Wrap apt to ensure [trusted=yes] in sources.list before every invocation.
-        // Termux apt-key uses compiled-in tmp path we can't write to, so GPG
-        // verification always fails. pkg rewrites sources.list without [trusted=yes],
-        // so this wrapper re-adds it every time.
+        // Import Termux GPG key and configure signed-by for package verification.
+        // Termux apt-key uses compiled-in tmp path we can't write to, so we import
+        // the key manually and use signed-by in sources.list instead of trusted=yes.
+        val keyringDir = File(prefixDir, "etc/apt/keyrings")
+        keyringDir.mkdirs()
         val aptBin = File(prefixDir, "bin/apt")
         val aptReal = File(prefixDir, "bin/apt.bin")
         if (aptBin.exists() && !aptReal.exists()) {
             aptBin.renameTo(aptReal)
             aptBin.writeText("""
                 #!/data/data/$appPkg/files/usr/bin/sh
-                sed -i '/^deb / { /\[trusted=yes\]/! s/^deb /deb [trusted=yes] / }' "$p/etc/apt/sources.list" 2>/dev/null
+                # Import Termux repo key if not present
+                kr="$p/etc/apt/keyrings/termux.gpg"
+                if [ ! -f "${'$'}kr" ] && command -v gpg >/dev/null 2>&1; then
+                    gpg --batch --keyserver hkp://keyserver.ubuntu.com --recv-keys 5C316B38 2>/dev/null
+                    gpg --batch --export 5C316B38 > "${'$'}kr" 2>/dev/null
+                fi
+                # Use signed-by if key exists, otherwise fall back to trusted=yes
+                if [ -f "${'$'}kr" ]; then
+                    sed -i '/^deb / { /\[signed-by=/! s|^deb |deb [signed-by='"${'$'}kr"'] | }' "$p/etc/apt/sources.list" 2>/dev/null
+                else
+                    sed -i '/^deb / { /\[trusted=yes\]/! s/^deb /deb [trusted=yes] / }' "$p/etc/apt/sources.list" 2>/dev/null
+                fi
                 exec "$p/bin/apt.bin" "${'$'}@"
             """.trimIndent() + "\n")
             aptBin.setExecutable(true, false)
@@ -523,7 +535,16 @@ class BootstrapInstaller(
             aptGetBin.renameTo(aptGetReal)
             aptGetBin.writeText("""
                 #!/data/data/$appPkg/files/usr/bin/sh
-                sed -i '/^deb / { /\[trusted=yes\]/! s/^deb /deb [trusted=yes] / }' "$p/etc/apt/sources.list" 2>/dev/null
+                kr="$p/etc/apt/keyrings/termux.gpg"
+                if [ ! -f "${'$'}kr" ] && command -v gpg >/dev/null 2>&1; then
+                    gpg --batch --keyserver hkp://keyserver.ubuntu.com --recv-keys 5C316B38 2>/dev/null
+                    gpg --batch --export 5C316B38 > "${'$'}kr" 2>/dev/null
+                fi
+                if [ -f "${'$'}kr" ]; then
+                    sed -i '/^deb / { /\[signed-by=/! s|^deb |deb [signed-by='"${'$'}kr"'] | }' "$p/etc/apt/sources.list" 2>/dev/null
+                else
+                    sed -i '/^deb / { /\[trusted=yes\]/! s/^deb /deb [trusted=yes] / }' "$p/etc/apt/sources.list" 2>/dev/null
+                fi
                 exec "$p/bin/apt-get.bin" "${'$'}@"
             """.trimIndent() + "\n")
             aptGetBin.setExecutable(true, false)

@@ -61,9 +61,9 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
 
         val filter = IntentFilter("kle.ljubitje.pai.RUN_COMMAND")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(commandReceiver, filter, Context.RECEIVER_EXPORTED)
+            registerReceiver(commandReceiver, filter, "kle.ljubitje.pai.permission.RUN_COMMAND", null, Context.RECEIVER_EXPORTED)
         } else {
-            registerReceiver(commandReceiver, filter)
+            registerReceiver(commandReceiver, filter, "kle.ljubitje.pai.permission.RUN_COMMAND", null)
         }
 
         // Check for command to run after terminal starts
@@ -333,7 +333,7 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
                 if (path != ".open-url") return
                 try {
                     val url = urlFile.readText().trim()
-                    if (url.isNotEmpty()) {
+                    if (url.isNotEmpty() && (url.startsWith("https://") || url.startsWith("http://"))) {
                         urlFile.delete()
                         runOnUiThread {
                             try {
