@@ -381,6 +381,7 @@ class BootstrapInstaller(
 
         post { onProgress("Staging bundled packages...") }
         stageBundledDebs(prefixDir)
+        stageBundledPai(prefixDir)
 
         Log.i(TAG, "Bootstrap complete: $entryCount files")
         post { onProgress("Bootstrap complete! $entryCount files installed.") }
@@ -424,6 +425,40 @@ class BootstrapInstaller(
             }
         }
         Log.i(TAG, "Staged $copied bundled .debs (${totalBytes / 1024} KB) to $offlineDir")
+    }
+
+    /**
+     * Copies bundled PAI release tarball from APK assets to $PREFIX/var/cache/pai/.
+     * pai-setup.sh extracts this instead of git-cloning when present, saving ~23 MB
+     * of download on first install. PAI doesn't change very often, so the bundled
+     * snapshot stays fresh for most users.
+     *
+     * No-op if assets/pai-release.tar is absent — bundling is optional; pai-setup
+     * falls back to `git clone` as before.
+     */
+    private fun stageBundledPai(prefixDir: File) {
+        val assets = context.assets
+        val tarName = "pai-release.tar"
+        val versionName = "pai-release.version"
+        val hasTar = try {
+            assets.open(tarName).close(); true
+        } catch (_: Exception) { false }
+        if (!hasTar) {
+            Log.i(TAG, "No bundled PAI release in assets — skipping PAI stage")
+            return
+        }
+        val paiDir = File(prefixDir, "var/cache/pai")
+        paiDir.mkdirs()
+        assets.open(tarName).use { src ->
+            FileOutputStream(File(paiDir, tarName)).use { dst -> src.copyTo(dst) }
+        }
+        try {
+            assets.open(versionName).use { src ->
+                FileOutputStream(File(paiDir, versionName)).use { dst -> src.copyTo(dst) }
+            }
+        } catch (_: Exception) { /* version file is optional */ }
+        val sz = File(paiDir, tarName).length()
+        Log.i(TAG, "Staged PAI release tarball (${sz / 1024} KB) to $paiDir")
     }
 
     /**

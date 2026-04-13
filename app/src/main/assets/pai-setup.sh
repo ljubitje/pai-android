@@ -81,12 +81,30 @@ if ! command -v claude &>/dev/null; then
 fi
 success "Claude Code: $(claude --version 2>&1)"
 
-# ── Clone PAI repository (sparse — .claude directory only) ──
+# ── Obtain PAI release ──
+# Prefer the APK-bundled tarball (fast, offline). Fall back to git clone when the
+# bundle is missing or when the user explicitly requests a refresh via PAI_REFRESH=1.
 PAI_REPO="$TMPDIR/pai-repo"
 PAI_CLAUDE_DIR="$PAI_REPO/Releases/v4.0.3/.claude"
+PAI_BUNDLE="${PREFIX}/var/cache/pai/pai-release.tar"
+PAI_VERSION_FILE="${PREFIX}/var/cache/pai/pai-release.version"
 
-if [ -d "$PAI_CLAUDE_DIR/PAI-Install" ]; then
-    info "PAI repo already cloned, updating..."
+use_bundle=0
+if [ -f "$PAI_BUNDLE" ] && [ "${PAI_REFRESH:-0}" != "1" ]; then
+    use_bundle=1
+fi
+
+if [ "$use_bundle" = "1" ]; then
+    if [ -f "$PAI_VERSION_FILE" ]; then
+        info "Extracting bundled PAI release ($(grep '^rev=' "$PAI_VERSION_FILE" | cut -c5-12))..."
+    else
+        info "Extracting bundled PAI release..."
+    fi
+    rm -rf "$PAI_REPO"
+    mkdir -p "$PAI_REPO/Releases/v4.0.3"
+    tar -xf "$PAI_BUNDLE" -C "$PAI_REPO/Releases/v4.0.3"
+elif [ -d "$PAI_CLAUDE_DIR/PAI-Install" ]; then
+    info "PAI repo already present, updating..."
     git -C "$PAI_REPO" pull --ff-only 2>/dev/null || true
 else
     info "Cloning PAI repository (sparse)..."
