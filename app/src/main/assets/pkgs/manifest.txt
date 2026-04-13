@@ -1,0 +1,9 @@
+# filename	package	version	size_bytes
+nodejs-lts_24.14.1_aarch64.deb	nodejs-lts	24.14.1	9641860
+git_2.53.0_aarch64.deb	git	2.53.0	4639076
+proot_5.1.107-70_aarch64.deb	proot	5.1.107-70	85320
+c-ares_1.34.6_aarch64.deb	c-ares	1.34.6	192096
+libicu_78.3_aarch64.deb	libicu	78.3	10210396
+libsqlite_3.53.0_aarch64.deb	libsqlite	3.53.0	756488
+libexpat_2.7.5_aarch64.deb	libexpat	2.7.5	92536
+libtalloc_2.4.3_aarch64.deb	libtalloc	2.4.3	33128

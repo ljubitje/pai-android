@@ -379,8 +379,51 @@ class BootstrapInstaller(
         post { onProgress("Configuring package manager...") }
         createAptConfig(prefixDir)
 
+        post { onProgress("Staging bundled packages...") }
+        stageBundledDebs(prefixDir)
+
         Log.i(TAG, "Bootstrap complete: $entryCount files")
         post { onProgress("Bootstrap complete! $entryCount files installed.") }
+    }
+
+    /**
+     * Copies bundled .deb files from APK assets to $PREFIX/var/cache/apt/archives/offline/.
+     * The first-run script (see [createFirstRunUpdate]) installs them via `dpkg -i` before
+     * any network call, so first-boot doesn't need to download nodejs-lts, git, proot, etc.
+     *
+     * No-op if the assets/pkgs/ directory is absent — bundling is optional.
+     */
+    private fun stageBundledDebs(prefixDir: File) {
+        val assets = context.assets
+        val entries = try {
+            assets.list("pkgs") ?: emptyArray()
+        } catch (_: Exception) {
+            emptyArray()
+        }
+        val debs = entries.filter { it.endsWith(".deb") }
+        if (debs.isEmpty()) {
+            Log.i(TAG, "No bundled .debs in assets/pkgs/ — skipping offline stage")
+            return
+        }
+        val offlineDir = File(prefixDir, "var/cache/apt/archives/offline")
+        offlineDir.mkdirs()
+        var copied = 0
+        var totalBytes = 0L
+        for (name in debs) {
+            val outFile = File(offlineDir, name)
+            assets.open("pkgs/$name").use { src ->
+                FileOutputStream(outFile).use { dst -> src.copyTo(dst) }
+            }
+            totalBytes += outFile.length()
+            copied++
+        }
+        // Copy manifest for debuggability — not used at install time.
+        if (entries.contains("manifest.txt")) {
+            assets.open("pkgs/manifest.txt").use { src ->
+                FileOutputStream(File(offlineDir, "manifest.txt")).use { dst -> src.copyTo(dst) }
+            }
+        }
+        Log.i(TAG, "Staged $copied bundled .debs (${totalBytes / 1024} KB) to $offlineDir")
     }
 
     /**
@@ -649,22 +692,45 @@ class BootstrapInstaller(
     }
 
     /**
-     * Creates a first-run script in profile.d/ that updates bundled packages.
-     * Sourced by $PREFIX/etc/profile on first login, then deletes itself.
+     * Creates a first-run script in profile.d/ that installs APK-bundled .debs
+     * offline, then refreshes them from network. Sourced by $PREFIX/etc/profile
+     * on first login, then deletes itself.
+     *
+     * Order matters:
+     *   1. dpkg -i the bundled .debs   (offline, no network, ~instant)
+     *   2. apt update && apt upgrade   (picks up security updates; usually no-op
+     *                                   for freshly-bundled packages)
+     *   3. apt install fallback        (covers anything that wasn't bundled, e.g.
+     *                                   if future releases add new prereqs)
      */
     private fun createFirstRunUpdate() {
         val appPkg = context.packageName
         val p = "/data/data/$appPkg/files/usr"
         val profileDir = File("$p/etc/profile.d")
         profileDir.mkdirs()
+        val offlineDir = "$p/var/cache/apt/archives/offline"
         val script = File(profileDir, "pai-first-run.sh")
         script.writeText("""
             # Self-delete first to prevent concurrent runs
             rm -f "$p/etc/profile.d/pai-first-run.sh"
-            echo -e "\033[1;36m[PAI] Updating bundled packages...\033[0m"
+
+            # 1. Install APK-bundled .debs offline (no network needed)
+            if ls "$offlineDir"/*.deb >/dev/null 2>&1; then
+                echo -e "\033[1;36m[PAI] Installing bundled packages (offline)...\033[0m"
+                # --force-confold: keep any existing config files untouched
+                dpkg -i --force-confold "$offlineDir"/*.deb 2>&1 || true
+                # Free APK-sized cache now that packages are installed
+                rm -rf "$offlineDir"
+            fi
+
+            # 2. Refresh from network (picks up security updates; idempotent)
+            echo -e "\033[1;36m[PAI] Updating package lists...\033[0m"
             apt update -y 2>&1 && apt upgrade -y 2>&1
-            echo -e "\033[1;36m[PAI] Installing PAI prerequisites...\033[0m"
+
+            # 3. Safety net — install anything we expect but didn't bundle
+            echo -e "\033[1;36m[PAI] Ensuring PAI prerequisites...\033[0m"
             apt install -y git proot unzip 2>&1
+
             echo -e "\033[1;32m[PAI] Ready. Run 'pai-setup' to install PAI.\033[0m"
         """.trimIndent() + "\n")
         Log.i(TAG, "Created first-run update script in profile.d/")
