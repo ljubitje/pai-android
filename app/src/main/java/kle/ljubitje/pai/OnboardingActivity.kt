@@ -83,7 +83,8 @@ class OnboardingActivity : ComponentActivity() {
     }
 
     // UI state
-    private var currentScreen by mutableStateOf("permission") // permission, battery, setup, install, ready
+    // Screens: permission, battery, existingInstall, existingConfirm, setup, install, ready
+    private var currentScreen by mutableStateOf("permission")
     private var setupProgress by mutableFloatStateOf(0f)
     private var setupError by mutableStateOf<String?>(null)
     private var currentStepIndex by mutableIntStateOf(0)
@@ -109,10 +110,27 @@ class OnboardingActivity : ComponentActivity() {
     )
     private val installLogLines = mutableStateListOf<String>()
 
+    // Tracks whether bootstrap extraction has been kicked off. We start it
+    // eagerly in onCreate even while the user is still on permission/battery
+    // screens, since BootstrapInstaller writes only to app-private storage
+    // and needs no user permission. By the time the user reaches the "setup"
+    // screen the heavy work is often already done — pure perceived-speed win.
+    private var bootstrapStarted = false
+
+    // Old-install detection state. Populated once we have storage permission
+    // (can't scan $HOME before that). Null = not yet scanned; empty list =
+    // scanned, nothing found; non-empty = show existingInstall screen.
+    private var detectedOldFiles by mutableStateOf<List<DetectedFile>?>(null)
+    // Chosen mode for handling the existing install. Null until user picks.
+    //   "update" → overlay tarball on top, preserve settings.json + user data
+    //   "clean"  → rm -rf everything detected, fresh start
+    private var reinstallMode by mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Permissions gate: storage first, then battery, then proceed
+        // Permissions gate: storage first, then battery, then existing-install
+        // detection, then proceed.
         currentScreen = when {
             !hasStoragePermission() -> "permission"
             isBatteryOptimized() -> "battery"
@@ -121,6 +139,7 @@ class OnboardingActivity : ComponentActivity() {
                 launchTerminal()
                 return
             }
+            shouldShowExistingInstall() -> "existingInstall"
             BootstrapInstaller.isBootstrapped(prefix) -> "ready"
             else -> "setup"
         }
@@ -142,6 +161,26 @@ class OnboardingActivity : ComponentActivity() {
                             "battery" -> BatteryScreen(
                                 onDisable = ::requestBatteryOptimizationExemption,
                                 onSkip = ::advancePastBattery,
+                            )
+                            "existingInstall" -> ExistingInstallScreen(
+                                detected = detectedOldFiles.orEmpty(),
+                                onChooseUpdate = {
+                                    reinstallMode = "update"
+                                    currentScreen = "existingConfirm"
+                                },
+                                onChooseClean = {
+                                    reinstallMode = "clean"
+                                    currentScreen = "existingConfirm"
+                                },
+                            )
+                            "existingConfirm" -> ExistingInstallConfirmScreen(
+                                mode = reinstallMode ?: "update",
+                                detected = detectedOldFiles.orEmpty(),
+                                onConfirm = ::applyReinstallMode,
+                                onBack = {
+                                    reinstallMode = null
+                                    currentScreen = "existingInstall"
+                                },
                             )
                             "setup" -> ProgressScreen(
                                 title = "Setting up PAI",
@@ -172,14 +211,42 @@ class OnboardingActivity : ComponentActivity() {
 
         if (currentScreen == "setup") {
             startSetup()
+        } else if (currentScreen == "permission" || currentScreen == "battery") {
+            // Parallelization: kick off bootstrap now in the background while
+            // the user deals with permission/battery prompts. When they reach
+            // the setup screen, progress is already advanced.
+            preloadBootstrapAsync()
         }
+    }
+
+    /**
+     * Starts bootstrap install eagerly in the background. Safe to call
+     * multiple times — guarded by [bootstrapStarted]. Only does work when
+     * bootstrap is not already installed.
+     */
+    private fun preloadBootstrapAsync() {
+        if (bootstrapStarted) return
+        if (BootstrapInstaller.isBootstrapped(prefix)) return
+        bootstrapStarted = true
+        // Preparatory mkdirs + deploy helpers (local, fast, no permissions)
+        listOf("$prefix/bin", "$prefix/lib", "$prefix/etc", "$prefix/tmp").forEach {
+            File(it).mkdirs()
+        }
+        deployShellConfigs()
+        deployUrlOpener()
+        runOnUiThread { markStep(setupSteps, 0, StepStatus.ACTIVE) }
+        runBootstrap()
     }
 
     override fun onResume() {
         super.onResume()
         // Advance through permission gates as each is granted
         if (currentScreen == "permission" && hasStoragePermission()) {
-            currentScreen = if (isBatteryOptimized()) "battery" else "setup"
+            currentScreen = when {
+                isBatteryOptimized() -> "battery"
+                shouldShowExistingInstall() -> "existingInstall"
+                else -> "setup"
+            }
             if (currentScreen == "setup") startSetup()
         } else if (currentScreen == "battery" && !isBatteryOptimized()) {
             advancePastBattery()
@@ -189,6 +256,152 @@ class OnboardingActivity : ComponentActivity() {
     /** PAI is installed when settings.json exists (written by the installer wizard). */
     private fun isPaiInstalled(): Boolean {
         return File("$home/.claude/settings.json").exists()
+    }
+
+    /**
+     * Scans sdcard root ($HOME) for leftover files from previous installs.
+     *
+     * Looks for a fixed set of known paths (matches what our own code writes —
+     * `.claude/`, `.bashrc`, `.bash_profile`, `.profile`) PLUS a dynamic glob
+     * for any `.claude*` entries to catch artifacts from forgotten versions
+     * (e.g. a stale `.claude.json` that Claude Code might have left behind).
+     *
+     * Storage permission is required — caller must check beforehand.
+     *
+     * @return list of detected files/dirs (empty if nothing found).
+     */
+    private fun scanForOldInstallFiles(): List<DetectedFile> {
+        val homeDir = File(home)
+        if (!homeDir.isDirectory) return emptyList()
+
+        // Fixed list — files our current code is known to have created.
+        val fixed = listOf(".claude", ".config", ".bashrc", ".bash_profile", ".profile")
+        val found = mutableMapOf<String, DetectedFile>()
+
+        fun track(f: File) {
+            if (!f.exists()) return
+            val size = if (f.isDirectory) dirSize(f) else f.length()
+            val fileCount = if (f.isDirectory) countFiles(f) else 1
+            found[f.name] = DetectedFile(
+                name = f.name,
+                path = f.absolutePath,
+                isDirectory = f.isDirectory,
+                sizeBytes = size,
+                fileCount = fileCount,
+            )
+        }
+
+        for (name in fixed) track(File(homeDir, name))
+
+        // Dynamic: any $HOME/.claude* entry we haven't already tracked.
+        homeDir.listFiles { f -> f.name.startsWith(".claude") }?.forEach { track(it) }
+
+        return found.values.sortedByDescending { it.sizeBytes }
+    }
+
+    private fun dirSize(dir: File): Long {
+        var total = 0L
+        dir.walkTopDown().forEach { if (it.isFile) total += it.length() }
+        return total
+    }
+
+    private fun countFiles(dir: File): Int {
+        var n = 0
+        dir.walkTopDown().forEach { if (it.isFile) n++ }
+        return n
+    }
+
+    /** Returns true if we should show the existingInstall screen before setup. */
+    private fun shouldShowExistingInstall(): Boolean {
+        if (detectedOldFiles == null) detectedOldFiles = scanForOldInstallFiles()
+        return (detectedOldFiles?.isNotEmpty() == true) && reinstallMode == null
+    }
+
+    /**
+     * Clean install: rm -rf every detected path. Runs synchronously on a
+     * background thread because some paths (e.g. `.claude/`) can hold
+     * thousands of files. Call only from a background Thread.
+     */
+    private fun performCleanWipe() {
+        val files = detectedOldFiles.orEmpty()
+        for (f in files) {
+            try {
+                val target = File(f.path)
+                if (target.exists()) {
+                    val ok = if (target.isDirectory) target.deleteRecursively() else target.delete()
+                    Log.i(TAG, "Clean wipe ${if (ok) "removed" else "FAILED"} ${target.absolutePath}")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Clean wipe error on ${f.path}: ${e.message}")
+            }
+        }
+        // After wipe, the scan is stale — caller should update state if it cares.
+    }
+
+    /**
+     * Update overlay: back up user-customized files, extract the bundled PAI
+     * release tarball ON TOP of the existing `.claude/` (adding/overwriting
+     * framework files, leaving everything else alone), then restore the
+     * backups. This preserves MEMORY/, user-created skills/agents/hooks, and
+     * the user's own `settings.json` / `CLAUDE.md`.
+     *
+     * EXPERIMENTAL: users are warned on the confirmation screen to back up
+     * their `.claude/` first. If any step fails we leave the directory as-is
+     * and surface the error via [setupError].
+     *
+     * @return true if overlay completed successfully, false otherwise.
+     */
+    private fun performUpdateOverlay(): Boolean {
+        val claudeDir = File(home, ".claude")
+        if (!claudeDir.exists()) {
+            Log.w(TAG, "Update overlay: $claudeDir doesn't exist — skipping overlay")
+            return false
+        }
+        // Files we must preserve across the overlay. These are in the release
+        // tarball so `tar -xf` would overwrite them if we didn't back up.
+        val preserveRelative = listOf("settings.json", "CLAUDE.md")
+        val backups = mutableMapOf<String, ByteArray>()
+        for (rel in preserveRelative) {
+            val f = File(claudeDir, rel)
+            if (f.exists() && f.isFile) {
+                try {
+                    backups[rel] = f.readBytes()
+                    Log.i(TAG, "Update overlay: backed up $rel (${backups[rel]?.size} bytes)")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Update overlay: failed to back up $rel: ${e.message}")
+                    // Soft-fail — continue; user was warned this is experimental
+                }
+            }
+        }
+
+        // Extract tarball over existing .claude/. The bundled tarball contains
+        // `.claude/` at root, so we extract into $home (parent of .claude/).
+        val bundleTar = File(prefix, "var/cache/pai/pai-release.tar")
+        val tarBin = File(prefix, "bin/tar")
+        if (!bundleTar.exists() || !tarBin.exists()) {
+            Log.w(TAG, "Update overlay: missing $bundleTar or $tarBin")
+            return false
+        }
+        val proc = ProcessBuilder(
+            tarBin.absolutePath, "-xf", bundleTar.absolutePath, "-C", home
+        ).redirectErrorStream(true).start()
+        val out = proc.inputStream.bufferedReader().readText()
+        val code = proc.waitFor()
+        if (code != 0) {
+            Log.e(TAG, "Update overlay: tar exit $code: ${out.take(500)}")
+            return false
+        }
+
+        // Restore backups (overwrites whatever the tarball put down).
+        for ((rel, data) in backups) {
+            try {
+                File(claudeDir, rel).writeBytes(data)
+                Log.i(TAG, "Update overlay: restored $rel")
+            } catch (e: Exception) {
+                Log.w(TAG, "Update overlay: failed to restore $rel: ${e.message}")
+            }
+        }
+        return true
     }
 
     private fun hasStoragePermission(): Boolean {
@@ -214,10 +427,66 @@ class OnboardingActivity : ComponentActivity() {
                 launchTerminal()
                 return
             }
+            shouldShowExistingInstall() -> "existingInstall"
             BootstrapInstaller.isBootstrapped(prefix) -> "ready"
             else -> "setup"
         }
         if (currentScreen == "setup") startSetup()
+    }
+
+    /**
+     * Called from the existingConfirm screen's "Proceed" button. Runs the
+     * chosen destructive action on a background thread (so UI stays
+     * responsive even when wiping a large `.claude/`), then advances to the
+     * next logical screen.
+     */
+    private fun applyReinstallMode() {
+        val mode = reinstallMode ?: return
+        // Show a lightweight "working" screen by staying on existingConfirm;
+        // the thread is fast enough that we don't add a full progress UI.
+        Thread {
+            try {
+                when (mode) {
+                    "clean" -> {
+                        performCleanWipe()
+                    }
+                    "update" -> {
+                        // Update overlay requires the PAI release tarball, which
+                        // lives inside $PREFIX once the bootstrap is installed.
+                        // If bootstrap isn't ready yet (fresh install flow),
+                        // defer the overlay until after setup completes. We mark
+                        // the mode; runPaiInstallFlow / startPaiInstall reads it.
+                        // If bootstrap IS already done (reinstall onto existing
+                        // bootstrap), do the overlay immediately.
+                        if (BootstrapInstaller.isBootstrapped(prefix)) {
+                            val ok = performUpdateOverlay()
+                            if (!ok) {
+                                Log.w(TAG, "Update overlay failed — falling back to clean path for safety")
+                                performCleanWipe()
+                            }
+                        }
+                        // When bootstrap is NOT yet installed, the normal setup
+                        // flow will build it; the "update" mode flag is picked
+                        // up later in startPaiInstall to skip the rm -rf step.
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "applyReinstallMode($mode) failed: ${e.message}")
+            }
+            // Refresh detection list so subsequent screens reflect reality
+            detectedOldFiles = scanForOldInstallFiles()
+            runOnUiThread {
+                currentScreen = when {
+                    BootstrapInstaller.isBootstrapped(prefix) && isPaiInstalled() -> {
+                        launchTerminal()
+                        return@runOnUiThread
+                    }
+                    BootstrapInstaller.isBootstrapped(prefix) -> "ready"
+                    else -> "setup"
+                }
+                if (currentScreen == "setup") startSetup()
+            }
+        }.start()
     }
 
     /** Returns true if the app is subject to battery optimization (i.e. NOT exempt). */
@@ -250,32 +519,45 @@ class OnboardingActivity : ComponentActivity() {
     // ── Setup (Bootstrap) ──
 
     private fun startSetup() {
+        // If we already kicked off bootstrap during the permission/battery
+        // screens (see preloadBootstrapAsync), it may already be in progress
+        // or finished — its onComplete callback will drive runPostBootstrapSetup
+        // unconditionally. In that case this call is a UI-state reset only.
         setupError = null
         logLines.clear()
-        for (i in setupSteps.indices) {
-            setupSteps[i] = setupSteps[i].copy(status = StepStatus.PENDING)
+        if (!bootstrapStarted) {
+            for (i in setupSteps.indices) {
+                setupSteps[i] = setupSteps[i].copy(status = StepStatus.PENDING)
+            }
         }
 
         listOf("$prefix/bin", "$prefix/lib", "$prefix/etc", "$prefix/tmp").forEach {
             File(it).mkdirs()
         }
-        // Deploy shell configs and URL opener to $HOME / $PREFIX/bin (not wiped by bootstrap)
-        deployShellConfigs()
-        deployUrlOpener()
 
         if (BootstrapInstaller.isBootstrapped(prefix)) {
             // Safe to deploy into $PREFIX now — bootstrap won't overwrite
+            deployShellConfigs()
+            deployUrlOpener()
             deployNodeFix()
             deployResolvConf()
             markStep(setupSteps, 0, StepStatus.DONE)
             markStep(setupSteps, 1, StepStatus.DONE)
             appendLog("Base system already installed.")
             appendLog("Package manager already configured.")
-            runPostBootstrapSetup()
-        } else {
+            // runPostBootstrapSetup is either already running (from preload) or
+            // needs to be kicked off now. preloadBootstrapAsync kicks it via
+            // BootstrapInstaller's onComplete, so only call here if preload
+            // didn't run.
+            if (!bootstrapStarted) runPostBootstrapSetup()
+        } else if (!bootstrapStarted) {
+            deployShellConfigs()
+            deployUrlOpener()
             markStep(setupSteps, 0, StepStatus.ACTIVE)
             runBootstrap()
         }
+        // else: bootstrap is already running from the preload, onComplete will
+        // advance the UI. Nothing to do here.
     }
 
     private fun runBootstrap() {
@@ -330,29 +612,58 @@ class OnboardingActivity : ComponentActivity() {
 
         Thread {
             try {
-                appendLog("$ apt update -y")
-                runShellCommand("apt update -y") { line ->
-                    appendLog(line)
+                // Step 1 — install APK-bundled .debs offline (no network). Covers
+                // git, proot, openssh, nodejs-lts and their deps. The first-run
+                // profile script (pai-first-run.sh) does this same work when the
+                // user opens a terminal; doing it here keeps the onboarding UI
+                // in sync and avoids a redundant re-install later.
+                val offlineDir = "$prefix/var/cache/apt/archives/offline"
+                if (File(offlineDir).exists() && (File(offlineDir).listFiles()
+                        ?.any { it.name.endsWith(".deb") } == true)) {
+                    appendLog("$ dpkg -i offline/*.deb  (bundled packages)")
+                    runShellCommand(
+                        "dpkg -i --force-confold $offlineDir/*.deb 2>&1 && " +
+                        "rm -rf $offlineDir"
+                    ) { line ->
+                        appendLog(line)
+                        runOnUiThread {
+                            if (setupProgress < 0.6f) setupProgress += 0.005f
+                        }
+                    }
                 }
+
                 runOnUiThread {
                     markStep(setupSteps, 2, StepStatus.DONE)
                     markStep(setupSteps, 3, StepStatus.ACTIVE)
                     setupProgress = 0.6f
                 }
 
-                appendLog("$ apt install -y git proot openssh unzip")
-                val aptExitCode = runShellCommand("apt install -y git proot openssh unzip 2>&1") { line ->
-                    appendLog(line)
-                    runOnUiThread {
-                        if (setupProgress < 0.85f) setupProgress += 0.005f
-                    }
-                }
-
-                // Verify critical binaries were actually installed
+                // Step 2 — verify everything the onboarding needs is present.
+                // If yes, we can skip both `apt update` and `apt install` entirely.
                 val requiredBins = listOf("git", "proot", "ssh")
                 val missingBins = requiredBins.filter { !File("$prefix/bin/$it").exists() }
+
                 if (missingBins.isNotEmpty()) {
-                    throw RuntimeException("Failed to install packages. Missing: ${missingBins.joinToString()}. Check your internet connection.")
+                    // Fallback: some package wasn't bundled (e.g. bundle was
+                    // stripped, or we added a new requirement). Do one network
+                    // round-trip to recover.
+                    appendLog("Missing bundled packages: ${missingBins.joinToString()} — fetching over network")
+                    appendLog("$ apt update -y")
+                    runShellCommand("apt update -y") { line -> appendLog(line) }
+                    val pkgs = missingBins.map { if (it == "ssh") "openssh" else it }.joinToString(" ")
+                    appendLog("$ apt install -y $pkgs")
+                    runShellCommand("apt install -y $pkgs 2>&1") { line ->
+                        appendLog(line)
+                        runOnUiThread {
+                            if (setupProgress < 0.85f) setupProgress += 0.005f
+                        }
+                    }
+                    val stillMissing = requiredBins.filter { !File("$prefix/bin/$it").exists() }
+                    if (stillMissing.isNotEmpty()) {
+                        throw RuntimeException("Failed to install packages. Missing: ${stillMissing.joinToString()}. Check your internet connection.")
+                    }
+                } else {
+                    appendLog("All prerequisites present from bundled packages (git, proot, ssh).")
                 }
 
                 runOnUiThread {
@@ -361,20 +672,12 @@ class OnboardingActivity : ComponentActivity() {
                     setupProgress = 0.85f
                 }
 
-                // Install Bun (best-effort — may not be in default Termux repo)
-                if (shellCommandSucceeds("command -v bun")) {
-                    appendLog("Bun already installed.")
-                } else {
-                    // Try adding tur-repo first (Termux User Repository has bun)
-                    appendLog("$ apt install -y tur-repo && apt update && apt install -y bun")
-                    runShellCommand("apt install -y tur-repo 2>&1 && apt update -y 2>&1 && apt install -y bun 2>&1") { line ->
-                        appendLog(line)
-                        runOnUiThread { if (setupProgress < 0.92f) setupProgress += 0.005f }
-                    }
-                    if (!File("$prefix/bin/bun").exists()) {
-                        appendLog("Bun not available — will use Node.js instead.")
-                    }
-                }
+                // Bun install is skipped: the official Bun binary doesn't run on
+                // Android's bionic libc (documented in pai-setup.sh) and PAI uses
+                // Node.js everywhere anyway. Skipping saves ~15-30s of network I/O
+                // on first install. If some future caller really wants Bun it can
+                // still be installed manually via `apt install tur-repo && apt install bun`.
+                appendLog("Skipping Bun install (PAI uses Node.js on Android).")
 
                 runOnUiThread {
                     markStep(setupSteps, 4, StepStatus.DONE)
@@ -455,8 +758,8 @@ class OnboardingActivity : ComponentActivity() {
                 }
                 // Install tsx and bun via npm (bun.sh binary is glibc, not Android-compatible)
                 if (!shellCommandSucceeds("command -v tsx")) {
-                    appendInstallLog("$ npm install -g tsx")
-                    runShellCommand("npm install -g tsx 2>&1") { line ->
+                    appendInstallLog("$ npm install -g tsx --loglevel=http --no-fund --no-audit")
+                    runShellCommand("npm install -g tsx --loglevel=http --no-fund --no-audit 2>&1") { line ->
                         appendInstallLog(line)
                         runOnUiThread { if (installProgress < 0.22f) installProgress += 0.003f }
                     }
@@ -478,8 +781,15 @@ class OnboardingActivity : ComponentActivity() {
                     appendInstallLog("Claude Code already installed.")
                     runShellCommand("claude --version 2>&1 || true") { line -> appendInstallLog("Claude Code: $line") }
                 } else {
-                    appendInstallLog("$ npm install -g @anthropic-ai/claude-code")
-                    runShellCommand("npm install -g @anthropic-ai/claude-code 2>&1") { line ->
+                    // --loglevel=http makes npm print each HTTP fetch as it
+                    // downloads, so the user sees real-time progress for the
+                    // ~50 MB claude-code install instead of a silent 1-3 min
+                    // stall. --no-fund --no-audit trim post-install noise.
+                    appendInstallLog("$ npm install -g @anthropic-ai/claude-code --loglevel=http --no-fund --no-audit")
+                    runShellCommandWithHeartbeat(
+                        "npm install -g @anthropic-ai/claude-code --loglevel=http --no-fund --no-audit 2>&1",
+                        ::appendInstallLog,
+                    ) { line ->
                         appendInstallLog(line)
                         runOnUiThread { if (installProgress < 0.45f) installProgress += 0.003f }
                     }
@@ -490,24 +800,47 @@ class OnboardingActivity : ComponentActivity() {
                     installProgress = 0.5f
                 }
 
-                // Step 3: Clone PAI repo (shallow clone — repo is large)
+                // Step 3: Obtain PAI release.
+                //   Preferred: extract APK-bundled pai-release.tar (instant, offline).
+                //   Fallback:  git clone from GitHub (when bundle missing or
+                //              PAI_REFRESH=1 set in env).
                 runOnUiThread { markStep(installSteps, 2, StepStatus.ACTIVE) }
 
                 val paiRepo = "$prefix/tmp/pai-repo"
                 val paiReleaseDir = "$paiRepo/Releases/v4.0.3"
                 val paiClaudeDir = "$paiReleaseDir/.claude"
+                val paiBundle = "$prefix/var/cache/pai/pai-release.tar"
+                val useBundle = File(paiBundle).exists() && reinstallMode != "update" // in update mode, overlay handles deploy later
 
-                if (File("$paiClaudeDir/install.sh").exists()) {
+                if (useBundle) {
+                    val rev = try {
+                        File("$prefix/var/cache/pai/pai-release.version")
+                            .readLines().firstOrNull { it.startsWith("rev=") }
+                            ?.substring(4, 12) ?: "bundled"
+                    } catch (_: Exception) { "bundled" }
+                    appendInstallLog("$ extract bundled PAI release ($rev)")
+                    runShellCommand(
+                        "rm -rf '$paiRepo' && " +
+                        "mkdir -p '$paiReleaseDir' && " +
+                        "tar -xf '$paiBundle' -C '$paiReleaseDir' 2>&1"
+                    ) { line ->
+                        appendInstallLog(line)
+                        runOnUiThread { if (installProgress < 0.82f) installProgress += 0.01f }
+                    }
+                } else if (File("$paiClaudeDir/install.sh").exists()) {
                     appendInstallLog("PAI repository already cloned, updating...")
-                    runShellCommand("git -C '$paiRepo' pull --ff-only 2>/dev/null || true") { line ->
+                    runShellCommand("git -C '$paiRepo' pull --ff-only --progress 2>&1 || true") { line ->
                         appendInstallLog(line)
                     }
                 } else {
-                    appendInstallLog("$ git clone PAI repository (sparse)")
-                    runShellCommand("""
+                    appendInstallLog("$ git clone --progress PAI repository (sparse)")
+                    // --progress forces git to emit progress lines even when
+                    // stdout is not a TTY, so the user sees counter updates
+                    // instead of a silent stall during the ~23 MB clone.
+                    runShellCommandWithHeartbeat("""
                         rm -rf '$paiRepo'
-                        git clone --depth 1 --sparse 'https://github.com/danielmiessler/Personal_AI_Infrastructure.git' '$paiRepo' 2>&1
-                    """.trimIndent()) { line ->
+                        git clone --progress --depth 1 --sparse 'https://github.com/danielmiessler/Personal_AI_Infrastructure.git' '$paiRepo' 2>&1
+                    """.trimIndent(), ::appendInstallLog) { line ->
                         appendInstallLog(line)
                         runOnUiThread { if (installProgress < 0.7f) installProgress += 0.003f }
                     }
@@ -532,12 +865,28 @@ class OnboardingActivity : ComponentActivity() {
                 // Step 4: Deploy release to ~/.claude
                 runOnUiThread { markStep(installSteps, 3, StepStatus.ACTIVE) }
 
-                // Copy release excluding settings.json so the
-                // installer's detection sees a fresh install, not an upgrade.
-                // The installer's Configuration step will generate settings.json.
-                appendInstallLog("$ deploy .claude → ~/")
-                runShellCommand("rm -rf '$home/.claude' && cp -r '$paiClaudeDir' '$home/.claude' && rm -f '$home/.claude/settings.json' 2>&1") { line ->
-                    appendInstallLog(line)
+                // Mode-aware deployment:
+                //   "update" → overlay tarball on top, preserve settings.json
+                //              and CLAUDE.md. Framework files are refreshed,
+                //              user data (MEMORY/, custom skills/agents) stays.
+                //   "clean" or null → traditional rm -rf + cp, then delete
+                //              settings.json so the PAI installer treats this
+                //              as a fresh install.
+                if (reinstallMode == "update") {
+                    appendInstallLog("$ overlay .claude (preserving user data)")
+                    val overlayOk = performUpdateOverlay()
+                    if (!overlayOk) {
+                        appendInstallLog("Overlay failed, falling back to clean deploy")
+                        appendInstallLog("$ deploy .claude → ~/  (fallback)")
+                        runShellCommand("rm -rf '$home/.claude' && cp -r '$paiClaudeDir' '$home/.claude' && rm -f '$home/.claude/settings.json' 2>&1") { line ->
+                            appendInstallLog(line)
+                        }
+                    }
+                } else {
+                    appendInstallLog("$ deploy .claude → ~/")
+                    runShellCommand("rm -rf '$home/.claude' && cp -r '$paiClaudeDir' '$home/.claude' && rm -f '$home/.claude/settings.json' 2>&1") { line ->
+                        appendInstallLog(line)
+                    }
                 }
 
                 if (!File("$home/.claude/install.sh").exists()) {
@@ -620,6 +969,56 @@ class OnboardingActivity : ComponentActivity() {
         val exitCode = process.waitFor()
         Log.i(TAG, "Command finished with exit code $exitCode: ${command.take(40)}")
         return exitCode
+    }
+
+    /**
+     * Runs [command] like [runShellCommand] but in parallel spawns a heartbeat
+     * thread that emits a "still working" line through [announce] every 15s
+     * whenever no output has arrived from the command. This keeps the UI alive
+     * during long silent operations (npm downloading ~50 MB of claude-code,
+     * git clone resolving refs, etc.) so users can tell the install hasn't
+     * frozen.
+     *
+     * @param command shell command (joined line-wise from $SHELL -c)
+     * @param announce invoked on the heartbeat thread with human-readable
+     *                 progress lines — must itself be thread-safe (uses
+     *                 runOnUiThread internally)
+     * @param onLine invoked for each stdout line from the command
+     */
+    private fun runShellCommandWithHeartbeat(
+        command: String,
+        announce: (String) -> Unit,
+        onLine: (String) -> Unit,
+    ): Int {
+        val started = System.currentTimeMillis()
+        val lastLineAt = java.util.concurrent.atomic.AtomicLong(started)
+        val stopHeartbeat = java.util.concurrent.atomic.AtomicBoolean(false)
+        val heartbeat = Thread {
+            try {
+                while (!stopHeartbeat.get()) {
+                    Thread.sleep(15_000)
+                    if (stopHeartbeat.get()) break
+                    val silent = (System.currentTimeMillis() - lastLineAt.get()) / 1000
+                    val total = (System.currentTimeMillis() - started) / 1000
+                    if (silent >= 15) {
+                        announce("  … still working (${total}s elapsed, ${silent}s since last output)")
+                    }
+                }
+            } catch (_: InterruptedException) {
+                // stop
+            }
+        }
+        heartbeat.isDaemon = true
+        heartbeat.start()
+        return try {
+            runShellCommand(command) { line ->
+                lastLineAt.set(System.currentTimeMillis())
+                onLine(line)
+            }
+        } finally {
+            stopHeartbeat.set(true)
+            heartbeat.interrupt()
+        }
     }
 
     private fun shellCommandSucceeds(command: String): Boolean {
@@ -878,6 +1277,21 @@ data class SetupStep(
 
 enum class StepStatus { PENDING, ACTIVE, DONE, ERROR }
 
+/** One entry in the "old install detected" list. */
+data class DetectedFile(
+    val name: String,       // e.g. ".claude"
+    val path: String,       // absolute path
+    val isDirectory: Boolean,
+    val sizeBytes: Long,
+    val fileCount: Int,     // 1 for files, N for dirs
+) {
+    fun humanSize(): String = when {
+        sizeBytes >= 1_048_576 -> "%.1f MB".format(sizeBytes / 1_048_576.0)
+        sizeBytes >= 1024      -> "%d KB".format(sizeBytes / 1024)
+        else                   -> "$sizeBytes B"
+    }
+}
+
 // ── Compose Screens ──
 
 @Composable
@@ -1046,6 +1460,260 @@ fun BatteryScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
             textAlign = TextAlign.Center,
         )
+    }
+}
+
+/**
+ * Shown after permissions when leftover files from a previous install are
+ * found on sdcard root. Offers two equal-weight choices: overlay update that
+ * preserves user data, or clean wipe + fresh start. Per the project's design
+ * memory (no dark patterns), both choices use identical button styling and
+ * neutral language — there is no pre-selected default.
+ */
+@Composable
+fun ExistingInstallScreen(
+    detected: List<DetectedFile>,
+    onChooseUpdate: () -> Unit,
+    onChooseClean: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 32.dp, vertical = 48.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Top,
+    ) {
+        Text(
+            text = "PAI",
+            style = MaterialTheme.typography.displayLarge,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold,
+        )
+        Text(
+            text = "Personal AI Infrastructure",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Spacer(Modifier.height(40.dp))
+
+        Text(
+            text = "Existing installation detected",
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.onBackground,
+            textAlign = TextAlign.Center,
+        )
+
+        Spacer(Modifier.height(16.dp))
+
+        Text(
+            text = "The following files or directories from a previous PAI or Claude installation were found on your device:",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            lineHeight = 22.sp,
+        )
+
+        Spacer(Modifier.height(20.dp))
+
+        // Detected-file list
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                .padding(16.dp),
+        ) {
+            for (f in detected) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = if (f.isDirectory) "${f.name}/" else f.name,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        text = if (f.isDirectory) "${f.humanSize()} · ${f.fileCount} files" else f.humanSize(),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(32.dp))
+
+        Text(
+            text = "Choose how to proceed:",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onBackground,
+        )
+
+        Spacer(Modifier.height(16.dp))
+
+        // Two equal-weight buttons, identical styling. Neutral labels.
+        Button(
+            onClick = onChooseUpdate,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            ),
+        ) {
+            Text("Update (keep my data)", fontSize = 18.sp)
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        Text(
+            text = "Experimental — refreshes PAI framework while preserving your settings, memory, and custom skills. Back up your ~/.claude/ manually first.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+            textAlign = TextAlign.Center,
+            lineHeight = 18.sp,
+        )
+
+        Spacer(Modifier.height(20.dp))
+
+        Button(
+            onClick = onChooseClean,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            ),
+        ) {
+            Text("Clean install (delete everything)", fontSize = 18.sp)
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        Text(
+            text = "Permanently removes the detected files and starts from scratch.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+            textAlign = TextAlign.Center,
+            lineHeight = 18.sp,
+        )
+
+        Spacer(Modifier.weight(1f))
+    }
+}
+
+/**
+ * Confirmation step shown after the user picks Update or Clean. Recapitulates
+ * exactly what will happen, with a single explicit "Proceed" button. The user
+ * can go back by pressing the secondary button.
+ */
+@Composable
+fun ExistingInstallConfirmScreen(
+    mode: String,
+    detected: List<DetectedFile>,
+    onConfirm: () -> Unit,
+    onBack: () -> Unit,
+) {
+    val isClean = mode == "clean"
+    val title = if (isClean) "Confirm clean install" else "Confirm update"
+    val action = if (isClean) "Delete all detected files" else "Update and preserve data"
+    val detail = if (isClean) {
+        "This will permanently delete the following from your sdcard:"
+    } else {
+        "This will overlay the bundled PAI release on top of your existing ~/.claude/. Your settings.json, CLAUDE.md, memory, and custom skills will be preserved. Framework files will be refreshed. This path is experimental — manual backup is recommended before continuing."
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 32.dp, vertical = 48.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Top,
+    ) {
+        Spacer(Modifier.height(24.dp))
+
+        Text(
+            text = title,
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.onBackground,
+            textAlign = TextAlign.Center,
+        )
+
+        Spacer(Modifier.height(20.dp))
+
+        Text(
+            text = detail,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            lineHeight = 22.sp,
+        )
+
+        Spacer(Modifier.height(24.dp))
+
+        if (isClean) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                    .padding(16.dp),
+            ) {
+                for (f in detected) {
+                    Text(
+                        text = (if (f.isDirectory) "${f.name}/" else f.name) + "  (${f.humanSize()})",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.padding(vertical = 2.dp),
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.weight(1f))
+
+        Button(
+            onClick = onConfirm,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            ),
+        ) {
+            Text(action, fontSize = 18.sp)
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        Button(
+            onClick = onBack,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            ),
+        ) {
+            Text("Back to options", fontSize = 18.sp)
+        }
+
+        Spacer(Modifier.height(24.dp))
     }
 }
 
