@@ -1,0 +1,6 @@
+tsx=4.21.0
+esbuild=0.27.0
+get-tsconfig=4.7.5
+resolve-pkg-maps=1.0.0
+native=@esbuild/android-arm64
+files=95

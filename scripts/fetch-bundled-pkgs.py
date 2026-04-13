@@ -42,7 +42,7 @@ MANIFEST = OUT_DIR / "manifest.txt"
 #   - nodejs-lts  (~20 MB, dominates first-run download)
 #   - git         (used by pai-setup.sh to clone PAI)
 #   - proot       (used by Claude Code / PAI at runtime)
-ROOT_PACKAGES = ["nodejs-lts", "git", "proot"]
+ROOT_PACKAGES = ["nodejs-lts", "npm", "git", "proot", "openssh"]
 
 # Virtual packages / alternatives that aren't real packages in the index.
 # Map them to concrete providers we want to pick.
@@ -51,6 +51,11 @@ VIRTUAL_PROVIDERS = {
     "sh": None,  # satisfied by bash in bootstrap
     "dash": None,
     "debianutils": None,
+    # npm declares `Depends: nodejs | nodejs-lts` and our resolver picks the
+    # first alternative. We'd then bundle nodejs alongside nodejs-lts (conflict
+    # because they install the same files). Remap `nodejs` to `nodejs-lts` so
+    # the alternative resolution lands on our already-bundled root package.
+    "nodejs": "nodejs-lts",
 }
 
 
