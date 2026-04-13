@@ -65,6 +65,33 @@ android {
     }
 }
 
+// Pre-patch the Termux bootstrap at build time so runtime doesn't need to
+// scan + rewrite 349 files in bin/ + etc/ on a cold Android filesystem.
+// See scripts/prebuild-bootstrap.py and BootstrapInstaller.patchTermuxPaths.
+val prebuildBootstrap = tasks.register<Exec>("prebuildBootstrap") {
+    val script = rootProject.file("scripts/prebuild-bootstrap.py")
+    val bootstrap = file("src/main/assets/bootstrap-aarch64.zip")
+    val stamp = file("src/main/assets/bootstrap-aarch64.zip.patched-stamp")
+    val pkg = android.defaultConfig.applicationId!!
+
+    inputs.file(script)
+    inputs.property("applicationId", pkg)
+    outputs.file(stamp)
+
+    commandLine("python3", script.absolutePath, "--package", pkg,
+                "--zip", bootstrap.absolutePath)
+}
+
+// Wire into every variant's mergeAssets task so it runs before packaging.
+androidComponents {
+    onVariants { variant ->
+        afterEvaluate {
+            tasks.named("merge${variant.name.replaceFirstChar { it.uppercase() }}Assets")
+                .configure { dependsOn(prebuildBootstrap) }
+        }
+    }
+}
+
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
     implementation(composeBom)

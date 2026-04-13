@@ -364,8 +364,16 @@ class BootstrapInstaller(
         post { onProgress("Extracted $entryCount files. Creating symlinks...") }
         createSymlinks(stagingDir, symlinkLines)
 
-        post { onProgress("Patching paths...") }
-        patchTermuxPaths(stagingDir)
+        // Path patching was moved to build time (scripts/prebuild-bootstrap.py).
+        // We no longer scan 349 files here at runtime — that saves 5-15 seconds
+        // on a cold filesystem. patchTermuxPaths() remains available as a fallback
+        // in case someone ships an unpatched bootstrap (detected below).
+        if (!isPrePatched(stagingDir)) {
+            post { onProgress("Patching paths (fallback)...") }
+            patchTermuxPaths(stagingDir)
+        } else {
+            Log.i(TAG, "Bootstrap is pre-patched at build time — skipping runtime scan")
+        }
 
         post { onProgress("Setting permissions...") }
         setExecutablePermissions(stagingDir)
@@ -382,6 +390,7 @@ class BootstrapInstaller(
         post { onProgress("Staging bundled packages...") }
         stageBundledDebs(prefixDir)
         stageBundledPai(prefixDir)
+        stageBundledTsx(prefixDir)
 
         Log.i(TAG, "Bootstrap complete: $entryCount files")
         post { onProgress("Bootstrap complete! $entryCount files installed.") }
@@ -459,6 +468,93 @@ class BootstrapInstaller(
         } catch (_: Exception) { /* version file is optional */ }
         val sz = File(paiDir, tarName).length()
         Log.i(TAG, "Staged PAI release tarball (${sz / 1024} KB) to $paiDir")
+    }
+
+    /**
+     * Extracts the bundled tsx + esbuild (aarch64) tarball directly into $PREFIX.
+     * Populates:
+     *   $PREFIX/bin/tsx
+     *   $PREFIX/lib/node_modules/tsx/
+     *   $PREFIX/lib/node_modules/get-tsconfig/
+     *   $PREFIX/lib/node_modules/esbuild/
+     *   $PREFIX/lib/node_modules/@esbuild/android-arm64/
+     *
+     * pai-setup.sh's `command -v tsx` check then passes and skips the network
+     * `npm install -g tsx`. Saves ~10-30s on first install.
+     *
+     * No-op if assets/tsx-bundle.tar is absent.
+     */
+    private fun stageBundledTsx(prefixDir: File) {
+        val assets = context.assets
+        val tarName = "tsx-bundle.tar"
+        val hasTar = try {
+            assets.open(tarName).close(); true
+        } catch (_: Exception) { false }
+        if (!hasTar) {
+            Log.i(TAG, "No bundled tsx in assets — skipping tsx stage")
+            return
+        }
+        // Stage the tarball to disk, then invoke the real tar (from bootstrap)
+        // to extract. We do NOT use java.util.zip / tar-in-java because the
+        // tar preserves POSIX permissions we need (executable bits on the
+        // esbuild native binary and the tsx shim script).
+        val stageTar = File(prefixDir, "tmp/tsx-bundle.tar")
+        stageTar.parentFile?.mkdirs()
+        assets.open(tarName).use { src ->
+            FileOutputStream(stageTar).use { dst -> src.copyTo(dst) }
+        }
+        val tarBin = File(prefixDir, "bin/tar")
+        if (!tarBin.exists()) {
+            Log.w(TAG, "tar not found in bootstrap — cannot extract tsx bundle")
+            stageTar.delete()
+            return
+        }
+        // tar is a dynamically-linked Termux binary; without LD_LIBRARY_PATH
+        // it can't find libandroid-glob.so and fails with "CANNOT LINK
+        // EXECUTABLE". The bootstrap ships all its libs under $PREFIX/lib.
+        val pb = ProcessBuilder(tarBin.absolutePath, "-xf", stageTar.absolutePath,
+                                "-C", prefixDir.absolutePath)
+            .redirectErrorStream(true)
+        pb.environment()["LD_LIBRARY_PATH"] = File(prefixDir, "lib").absolutePath
+        pb.environment()["PATH"] = File(prefixDir, "bin").absolutePath
+        val proc = pb.start()
+        val out = proc.inputStream.bufferedReader().readText()
+        val code = proc.waitFor()
+        stageTar.delete()
+        if (code != 0) {
+            Log.w(TAG, "tsx bundle extraction exited $code: ${out.take(500)}")
+            return
+        }
+        // Ensure executables are flagged (tar should do this, belt-and-braces)
+        File(prefixDir, "bin/tsx").setExecutable(true, false)
+        File(prefixDir, "bin/tsx.mjs").setExecutable(true, false)
+        Log.i(TAG, "Staged tsx bundle (extracted to $prefixDir)")
+    }
+
+    /**
+     * Detects whether the bootstrap was pre-patched at build time by checking
+     * a canonical file (/bin/apt is always a text script in Termux bootstrap)
+     * for our package name vs the default com.termux. Cheap sample — reads one
+     * file instead of scanning 349.
+     */
+    private fun isPrePatched(stagingDir: File): Boolean {
+        val probe = File(stagingDir, "etc/apt/sources.list.d")
+            .takeIf { it.exists() }
+            ?.listFiles()?.firstOrNull()
+            ?: File(stagingDir, "etc/termux/termux-bootstrap/termux-bootstrap-second-stage.sh")
+            .takeIf { it.exists() }
+            ?: File(stagingDir, "etc/profile")
+        return try {
+            if (!probe.exists()) return false
+            val text = probe.readText(Charsets.UTF_8)
+            val hasOurPkg = text.contains("/data/data/${context.packageName}/")
+            val hasTermuxPkg = text.contains("/data/data/com.termux/")
+            // Either it mentions our path (definitely patched) OR it contains
+            // no path at all (trivially "patched"). Flag only when unambiguous.
+            hasOurPkg && !hasTermuxPkg
+        } catch (_: Exception) {
+            false
+        }
     }
 
     /**
@@ -583,11 +679,15 @@ class BootstrapInstaller(
         // the key manually and use signed-by in sources.list instead of trusted=yes.
         val keyringDir = File(prefixDir, "etc/apt/keyrings")
         keyringDir.mkdirs()
-        val aptBin = File(prefixDir, "bin/apt")
-        val aptReal = File(prefixDir, "bin/apt.bin")
-        if (aptBin.exists() && !aptReal.exists()) {
-            aptBin.renameTo(aptReal)
-            aptBin.writeText("""
+        // Shared wrapper prelude: GPG key bootstrap + lazy `apt update`.
+        //
+        // Lazy-update design: first-run script drops a sentinel file at
+        // `var/lib/apt/.needs-update`. When the user first runs `apt` or
+        // `apt-get` (other than `update` itself), we transparently trigger
+        // `apt update` and delete the sentinel. This keeps the critical
+        // post-install path off the network while still giving the user
+        // fresh indices the moment they ask apt to do anything.
+        val wrapperPrelude = """
                 #!/data/data/$appPkg/files/usr/bin/sh
                 # Import Termux repo key if not present
                 kr="$p/etc/apt/keyrings/termux.gpg"
@@ -601,8 +701,27 @@ class BootstrapInstaller(
                 else
                     sed -i '/^deb / { /\[trusted=yes\]/! s/^deb /deb [trusted=yes] / }' "$p/etc/apt/sources.list" 2>/dev/null
                 fi
-                exec "$p/bin/apt.bin" "${'$'}@"
-            """.trimIndent() + "\n")
+                # Lazy `apt update`: trigger once, on the user's first apt invocation
+                # that isn't itself `update`. Skip when explicitly disabled.
+                if [ -f "$p/var/lib/apt/.needs-update" ] && [ "${'$'}{PAI_SKIP_APT_UPDATE:-0}" != "1" ]; then
+                    case "${'$'}1" in
+                        update|--version|-v|"") : ;;
+                        *)
+                            echo "[apt] First-use refresh of package indices..." >&2
+                            rm -f "$p/var/lib/apt/.needs-update"
+                            WRAPPER_BIN_SELF="${'$'}0"
+                            # Call the real binary directly to avoid wrapper recursion
+                            "${'$'}{WRAPPER_BIN_SELF}.bin" update 2>&1 | tail -5 >&2 || true
+                            ;;
+                    esac
+                fi
+        """.trimIndent()
+
+        val aptBin = File(prefixDir, "bin/apt")
+        val aptReal = File(prefixDir, "bin/apt.bin")
+        if (aptBin.exists() && !aptReal.exists()) {
+            aptBin.renameTo(aptReal)
+            aptBin.writeText(wrapperPrelude + "\n" + "exec \"$p/bin/apt.bin\" \"\$@\"\n")
             aptBin.setExecutable(true, false)
         }
 
@@ -611,20 +730,7 @@ class BootstrapInstaller(
         val aptGetReal = File(prefixDir, "bin/apt-get.bin")
         if (aptGetBin.exists() && !aptGetReal.exists()) {
             aptGetBin.renameTo(aptGetReal)
-            aptGetBin.writeText("""
-                #!/data/data/$appPkg/files/usr/bin/sh
-                kr="$p/etc/apt/keyrings/termux.gpg"
-                if [ ! -f "${'$'}kr" ] && command -v gpg >/dev/null 2>&1; then
-                    gpg --batch --keyserver hkp://keyserver.ubuntu.com --recv-keys 5C316B38 2>/dev/null
-                    gpg --batch --export 5C316B38 > "${'$'}kr" 2>/dev/null
-                fi
-                if [ -f "${'$'}kr" ]; then
-                    sed -i '/^deb / { /\[signed-by=/! s|^deb |deb [signed-by='"${'$'}kr"'] | }' "$p/etc/apt/sources.list" 2>/dev/null
-                else
-                    sed -i '/^deb / { /\[trusted=yes\]/! s/^deb /deb [trusted=yes] / }' "$p/etc/apt/sources.list" 2>/dev/null
-                fi
-                exec "$p/bin/apt-get.bin" "${'$'}@"
-            """.trimIndent() + "\n")
+            aptGetBin.writeText(wrapperPrelude + "\n" + "exec \"$p/bin/apt-get.bin\" \"\$@\"\n")
             aptGetBin.setExecutable(true, false)
         }
 
@@ -652,6 +758,25 @@ class BootstrapInstaller(
                 infoDir=$infoDir
                 iHome=$internalHome
 
+                # dpkg-deb -b creates a temp file for the control member. Without
+                # TMPDIR set, it falls back to a compiled-in Termux path that
+                # doesn't exist under our package name, and silently produces a
+                # 0-byte .deb — which then fails at install with "unexpected end
+                # of file". This caused nodejs-lts + its deps (c-ares, libicu,
+                # libsqlite) to go uninstalled from our offline bundle. Forcing
+                # TMPDIR to our prefix's tmp fixes it.
+                export TMPDIR="${'$'}p/tmp"
+                mkdir -p "${'$'}TMPDIR"
+
+                # Each wrapper invocation gets its OWN temp subdirectory. Without
+                # this, concurrent invocations (e.g. setup's dpkg -i running
+                # alongside PAI-install's apt install) stomped each other's
+                # patched .deb files during the end-of-wrapper cleanup — causing
+                # "cannot access archive: No such file or directory" errors for
+                # the outer invocation's packages. Scoping cleanup to our own
+                # invocation dir makes the wrapper safe for parallel use.
+                invocTmp=${'$'}(mktemp -d "${'$'}p/tmp/dpkg-invoc.XXXXXX")
+
                 # Patch existing dpkg maintainer scripts
                 for f in ${'$'}infoDir/*.postinst ${'$'}infoDir/*.preinst ${'$'}infoDir/*.prerm ${'$'}infoDir/*.postrm; do
                     [ -f "${'$'}f" ] && sed -i 's|/data/data/com.termux|/data/data/'"${'$'}appPkg"'|g' "${'$'}f" 2>/dev/null
@@ -661,7 +786,7 @@ class BootstrapInstaller(
                 new_args=""
                 for arg in "${'$'}@"; do
                     if [ -f "${'$'}arg" ] && echo "${'$'}arg" | grep -qE '\.deb${'$'}'; then
-                        pdir=${'$'}(mktemp -d "${'$'}p/tmp/deb-patch.XXXXXX")
+                        pdir=${'$'}(mktemp -d "${'$'}invocTmp/deb-patch.XXXXXX")
                         "${'$'}p/bin/dpkg-deb" --raw-extract "${'$'}arg" "${'$'}pdir/pkg" 2>/dev/null
                         if [ -d "${'$'}pdir/pkg/DEBIAN" ]; then
                             # Patch shebangs in control scripts
@@ -674,7 +799,9 @@ class BootstrapInstaller(
                                 sed -i 's|/data/data/com.termux|/data/data/'"${'$'}appPkg"'|g' "${'$'}f" 2>/dev/null
                             done
                             "${'$'}p/bin/dpkg-deb" -b "${'$'}pdir/pkg" "${'$'}pdir/patched.deb" 2>/dev/null
-                            if [ -f "${'$'}pdir/patched.deb" ]; then
+                            # Use -s (non-empty) not -f; a zero-byte patched.deb
+                            # would otherwise be chosen and fail at install.
+                            if [ -s "${'$'}pdir/patched.deb" ]; then
                                 new_args="${'$'}new_args ${'$'}pdir/patched.deb"
                             else
                                 new_args="${'$'}new_args ${'$'}arg"
@@ -688,10 +815,16 @@ class BootstrapInstaller(
                     fi
                 done
 
-                # Add --admindir if not already specified (dpkg.bin has hardcoded com.termux paths)
+                # Add --admindir + --instdir if not already specified. Termux-compiled
+                # dpkg.bin has `/data/data/com.termux/files/...` paths baked in; when
+                # invoked directly (not via apt) with no overrides it tries to extract
+                # `./data/data/com.termux/...` paths relative to `/` and gets
+                # "Permission denied" on the read-only root. The instdir below is a
+                # symlink farm (tmp/dpkg-instdir/data/data/com.termux -> our app data
+                # dir) set up in createAptConfig(), so extraction redirects correctly.
                 case "${'$'}new_args" in
                     *--admindir*) ;;
-                    *) new_args="--admindir=${'$'}p/var/lib/dpkg --force-script-chrootless ${'$'}new_args" ;;
+                    *) new_args="--admindir=${'$'}p/var/lib/dpkg --instdir=${'$'}p/tmp/dpkg-instdir --force-script-chrootless ${'$'}new_args" ;;
                 esac
 
                 HOME=${'$'}iHome "${'$'}p/bin/dpkg.bin" ${'$'}new_args
@@ -702,8 +835,9 @@ class BootstrapInstaller(
                     [ -f "${'$'}f" ] && sed -i 's|/data/data/com.termux|/data/data/'"${'$'}appPkg"'|g' "${'$'}f" 2>/dev/null
                 done
 
-                # Clean up patched .deb temp dirs
-                rm -rf "${'$'}p/tmp/deb-patch."* 2>/dev/null
+                # Clean up only THIS invocation's temp dir (not the global pool,
+                # which could belong to a concurrent wrapper instance).
+                rm -rf "${'$'}invocTmp" 2>/dev/null
 
                 exit ${'$'}ret
             """.trimIndent() + "\n")
@@ -728,15 +862,13 @@ class BootstrapInstaller(
 
     /**
      * Creates a first-run script in profile.d/ that installs APK-bundled .debs
-     * offline, then refreshes them from network. Sourced by $PREFIX/etc/profile
-     * on first login, then deletes itself.
+     * offline. Sourced by $PREFIX/etc/profile on first login, then deletes itself.
      *
-     * Order matters:
-     *   1. dpkg -i the bundled .debs   (offline, no network, ~instant)
-     *   2. apt update && apt upgrade   (picks up security updates; usually no-op
-     *                                   for freshly-bundled packages)
-     *   3. apt install fallback        (covers anything that wasn't bundled, e.g.
-     *                                   if future releases add new prereqs)
+     * Design goals: keep this path minimal. No `apt update`, no `apt upgrade`,
+     * no `apt install`. The bundled .debs cover all PAI prerequisites; anything
+     * the user wants to install later via `pkg`/`apt` triggers a lazy
+     * `apt update` via a wrapper (see [createAptConfig]). This shaves 15-25s
+     * off the first-run critical path.
      */
     private fun createFirstRunUpdate() {
         val appPkg = context.packageName
@@ -749,7 +881,9 @@ class BootstrapInstaller(
             # Self-delete first to prevent concurrent runs
             rm -f "$p/etc/profile.d/pai-first-run.sh"
 
-            # 1. Install APK-bundled .debs offline (no network needed)
+            # Install APK-bundled .debs offline (no network needed).
+            # Bundled: nodejs-lts, git, proot, libicu, libsqlite, libexpat,
+            # libtalloc, c-ares. Everything PAI prerequisites need.
             if ls "$offlineDir"/*.deb >/dev/null 2>&1; then
                 echo -e "\033[1;36m[PAI] Installing bundled packages (offline)...\033[0m"
                 # --force-confold: keep any existing config files untouched
@@ -758,13 +892,9 @@ class BootstrapInstaller(
                 rm -rf "$offlineDir"
             fi
 
-            # 2. Refresh from network (picks up security updates; idempotent)
-            echo -e "\033[1;36m[PAI] Updating package lists...\033[0m"
-            apt update -y 2>&1 && apt upgrade -y 2>&1
-
-            # 3. Safety net — install anything we expect but didn't bundle
-            echo -e "\033[1;36m[PAI] Ensuring PAI prerequisites...\033[0m"
-            apt install -y git proot unzip 2>&1
+            # Mark that apt has never been updated on this install; the apt
+            # wrapper (see createAptConfig) auto-runs `apt update` on first use.
+            touch "$p/var/lib/apt/.needs-update"
 
             echo -e "\033[1;32m[PAI] Ready. Run 'pai-setup' to install PAI.\033[0m"
         """.trimIndent() + "\n")
