@@ -84,7 +84,7 @@ extract_pkg "$ESB_NATIVE_TAR" "$NM/@esbuild/android-arm64"
 # The wrapper at runtime runs require("@esbuild/<platform-arch>") which Node
 # resolves from node_modules. Mark it installed by nulling install.js.
 if [ -f "$NM/esbuild/install.js" ]; then
-    echo "// bundled by pai-android; native binary pre-installed" > "$NM/esbuild/install.js"
+    echo "// bundled by android-pai; native binary pre-installed" > "$NM/esbuild/install.js"
 fi
 
 # Wire up tsx's own node_modules so it can resolve its deps from the global tree.
@@ -93,15 +93,15 @@ fi
 
 # bin/tsx shim — shebangs under Termux must point at the real node path on device.
 cat > "$BIN/tsx" <<'EOF'
-#!/data/data/kle.ljubitje.pai/files/usr/bin/node
-require('/data/data/kle.ljubitje.pai/files/usr/lib/node_modules/tsx/dist/cli.cjs');
+#!/data/data/kle.ljubitje.apai/files/usr/bin/node
+require('/data/data/kle.ljubitje.apai/files/usr/lib/node_modules/tsx/dist/cli.cjs');
 EOF
 chmod 0755 "$BIN/tsx"
 
 # Also produce .mjs-aware fallback
 cat > "$BIN/tsx.mjs" <<'EOF'
-#!/data/data/kle.ljubitje.pai/files/usr/bin/node
-import('/data/data/kle.ljubitje.pai/files/usr/lib/node_modules/tsx/dist/cli.mjs');
+#!/data/data/kle.ljubitje.apai/files/usr/bin/node
+import('/data/data/kle.ljubitje.apai/files/usr/lib/node_modules/tsx/dist/cli.mjs');
 EOF
 chmod 0755 "$BIN/tsx.mjs"
 

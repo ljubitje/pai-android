@@ -15,7 +15,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "PAI"
+rootProject.name = "APAI"
 include(":app")
 include(":terminal-emulator")
 include(":terminal-view")

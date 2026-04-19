@@ -1,4 +1,4 @@
-#!/data/data/kle.ljubitje.pai/files/usr/bin/sh
+#!/data/data/kle.ljubitje.apai/files/usr/bin/sh
 # Bun shim for Android — native bun is glibc-only, so delegate to node/tsx.
 # Supports: bun run, bun install, bun --version, bunx
 

@@ -2,7 +2,7 @@
 """
 Pre-patch the Termux bootstrap at BUILD time.
 
-Moves the expensive path-rewriting step (com.termux → kle.ljubitje.pai) from
+Moves the expensive path-rewriting step (com.termux → kle.ljubitje.apai) from
 runtime (BootstrapInstaller.patchTermuxPaths scanning bin/ + etc/ on a cold
 filesystem) to build time (one pass on the developer/CI machine).
 
@@ -37,7 +37,7 @@ DEFAULT_ZIP = REPO_ROOT / "app/src/main/assets/bootstrap-aarch64.zip"
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--package", default="kle.ljubitje.pai",
+    ap.add_argument("--package", default="kle.ljubitje.apai",
                     help="Android applicationId to rewrite paths to")
     ap.add_argument("--zip", type=Path, default=DEFAULT_ZIP,
                     help="Path to bootstrap zip (patched in place)")

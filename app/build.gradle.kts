@@ -12,11 +12,11 @@ val keystoreProperties = Properties().apply {
 }
 
 android {
-    namespace = "kle.ljubitje.pai"
+    namespace = "kle.ljubitje.apai"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "kle.ljubitje.pai"
+        applicationId = "kle.ljubitje.apai"
         minSdk = 26
         targetSdk = 28 // Required: allows execute_no_trans for binaries in app data (like Termux)
         versionCode = 3

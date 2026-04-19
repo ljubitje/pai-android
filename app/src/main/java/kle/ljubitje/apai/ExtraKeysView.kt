@@ -1,4 +1,4 @@
-package kle.ljubitje.pai
+package kle.ljubitje.apai
 
 import android.content.Context
 import android.content.Intent

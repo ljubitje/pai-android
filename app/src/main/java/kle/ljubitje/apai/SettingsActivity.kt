@@ -1,4 +1,4 @@
-package kle.ljubitje.pai
+package kle.ljubitje.apai
 
 import android.content.Context
 import android.content.Intent
@@ -44,7 +44,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kle.ljubitje.pai.ui.theme.PAITheme
+import kle.ljubitje.apai.ui.theme.PAITheme
 import java.io.File
 
 class SettingsActivity : ComponentActivity() {
@@ -239,7 +239,7 @@ fun SettingsScreen(
             CardDivider()
             InfoRow("PAI Version", detectPaiVersion(home))
             CardDivider()
-            InfoRow("Package", "kle.ljubitje.pai")
+            InfoRow("Package", "kle.ljubitje.apai")
         }
 
         Spacer(Modifier.height(16.dp))

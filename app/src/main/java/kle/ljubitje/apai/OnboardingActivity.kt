@@ -1,4 +1,4 @@
-package kle.ljubitje.pai
+package kle.ljubitje.apai
 
 import android.content.Context
 import android.content.Intent
@@ -58,7 +58,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kle.ljubitje.pai.ui.theme.PAITheme
+import kle.ljubitje.apai.ui.theme.PAITheme
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader

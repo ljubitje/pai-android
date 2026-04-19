@@ -1,4 +1,4 @@
-#!/data/data/kle.ljubitje.pai/files/usr/bin/bash
+#!/data/data/kle.ljubitje.apai/files/usr/bin/bash
 # PAI Android — Setup Script (v2)
 # Clones PAI repo and runs the official installer via Node.js
 # (Bun's official binary doesn't run on Android/Bionic)

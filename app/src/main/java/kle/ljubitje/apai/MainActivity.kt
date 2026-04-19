@@ -1,4 +1,4 @@
-package kle.ljubitje.pai
+package kle.ljubitje.apai
 
 import android.content.BroadcastReceiver
 import android.content.ClipData
@@ -59,11 +59,11 @@ class MainActivity : ComponentActivity(), TerminalViewClient, TerminalSessionCli
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        val filter = IntentFilter("kle.ljubitje.pai.RUN_COMMAND")
+        val filter = IntentFilter("kle.ljubitje.apai.RUN_COMMAND")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(commandReceiver, filter, "kle.ljubitje.pai.permission.RUN_COMMAND", null, Context.RECEIVER_EXPORTED)
+            registerReceiver(commandReceiver, filter, "kle.ljubitje.apai.permission.RUN_COMMAND", null, Context.RECEIVER_EXPORTED)
         } else {
-            registerReceiver(commandReceiver, filter, "kle.ljubitje.pai.permission.RUN_COMMAND", null)
+            registerReceiver(commandReceiver, filter, "kle.ljubitje.apai.permission.RUN_COMMAND", null)
         }
 
         // Check for command to run after terminal starts
