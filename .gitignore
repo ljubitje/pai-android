@@ -18,3 +18,4 @@ keystore.properties
 MEMORY/
 **/build/intermediates/cxx/
 **/compileTransaction/
+PLAN.md
