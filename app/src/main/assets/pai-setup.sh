@@ -181,6 +181,27 @@ if [ -f "$CLAUDE_BIN" ] && head -1 "$CLAUDE_BIN" 2>/dev/null | grep -q "^echo"; 
         fi
     done
 
+    # Step 5: Patch musl's hardcoded /etc/resolv.conf path for Android DNS
+    # musl libc reads /etc/resolv.conf which doesn't exist on Android. Patch the
+    # musl dynamic linker to use our $PREFIX/etc/resolv.conf instead.
+    if [ -f "$MUSL_LD" ]; then
+        info "Patching musl DNS resolver path..."
+        node -e "
+            const fs = require('fs');
+            const buf = fs.readFileSync('$MUSL_LD');
+            const oldPath = '/etc/resolv.conf';
+            const newPath = '$PREFIX/etc/resolv.conf';
+            const oldBuf = Buffer.from(oldPath + '\0');
+            const idx = buf.indexOf(oldBuf);
+            if (idx === -1) { console.log('resolv.conf path already patched or not found'); process.exit(0); }
+            const newBuf = Buffer.from(newPath + '\0');
+            buf.fill(0, idx, idx + Math.max(oldBuf.length, newBuf.length));
+            newBuf.copy(buf, idx);
+            fs.writeFileSync('$MUSL_LD', buf);
+            console.log('Patched: ' + oldPath + ' → ' + newPath);
+        " 2>&1
+    fi
+
     success "Claude Code native binary patched for Android"
 fi
 success "Claude Code: $(claude --version 2>&1)"

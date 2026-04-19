@@ -795,6 +795,14 @@ class OnboardingActivity : ComponentActivity() {
                     }
                     runShellCommand("termux-fix-shebang $prefix/bin/claude 2>/dev/null || true") { _ -> }
                 }
+
+                // Fix Claude Code native binary for Android.
+                // Android's Node.js reports process.platform==="android" (not "linux"),
+                // so the native binary is never downloaded. We force-install the musl
+                // variant, provide Alpine's musl dynamic linker, and patch the ELF
+                // interpreter to point at it under $PREFIX/lib.
+                fixClaudeNativeBinary()
+
                 runOnUiThread {
                     markStep(installSteps, 1, StepStatus.DONE)
                     installProgress = 0.5f
@@ -1250,6 +1258,133 @@ class OnboardingActivity : ComponentActivity() {
             setupDest.setExecutable(true, false)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to deploy pai-setup: ${e.message}")
+        }
+    }
+
+    /**
+     * Fix Claude Code native binary for Android. Mirrors the logic in
+     * pai-setup.sh steps 1-4:
+     *  1. Force-install the linux-arm64-musl native package
+     *  2. Install Alpine's musl dynamic linker
+     *  3. Patch the ELF interpreter path
+     *  4. Patch install.cjs/cli-wrapper.cjs for android platform detection
+     */
+    private fun fixClaudeNativeBinary() {
+        val claudePkgDir = "$prefix/lib/node_modules/@anthropic-ai/claude-code"
+        val claudeBin = "$claudePkgDir/bin/claude.exe"
+
+        // Check if fix is needed: bin/claude.exe is a shell stub (starts with "echo")
+        // or doesn't exist at all
+        val binFile = File(claudeBin)
+        if (!binFile.exists()) {
+            appendInstallLog("Claude Code binary not found, skipping native fix")
+            return
+        }
+        val header = try { binFile.inputStream().use { it.read(ByteArray(4)).let { _ -> binFile.readBytes().take(4) } } } catch (_: Exception) { emptyList() }
+        val isElf = header.size >= 4 && header[0] == 0x7f.toByte() && header[1] == 'E'.code.toByte()
+        if (isElf) {
+            appendInstallLog("Claude Code native binary already installed")
+            return
+        }
+
+        appendInstallLog("Fixing Claude Code native binary for Android...")
+
+        // Step 1: Force-install the musl native package
+        appendInstallLog("$ npm install -g --force claude-code-linux-arm64-musl")
+        runShellCommand(
+            "CLAUDE_VER=\$(node -e \"console.log(require('$claudePkgDir/package.json').version)\") && " +
+            "npm install -g --force \"@anthropic-ai/claude-code-linux-arm64-musl@\$CLAUDE_VER\" 2>&1"
+        ) { line ->
+            appendInstallLog(line)
+            runOnUiThread { if (installProgress < 0.48f) installProgress += 0.002f }
+        }
+
+        // Step 2: Install musl dynamic linker from Alpine
+        val muslLd = "$prefix/lib/ld-musl-aarch64.so.1"
+        if (!File(muslLd).exists()) {
+            appendInstallLog("Installing musl dynamic linker from Alpine...")
+            runShellCommand(
+                "MUSL_CACHE=\"$prefix/var/cache/pai/musl-aarch64.apk\" && " +
+                "mkdir -p \"\$(dirname \"\$MUSL_CACHE\")\" && " +
+                "if [ ! -f \"\$MUSL_CACHE\" ]; then " +
+                "  MUSL_VER=\$(curl -fsSL 'https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/aarch64/' 2>/dev/null | grep -o 'musl-[0-9][^\"]*\\.apk' | head -1) && " +
+                "  curl -fsSL \"https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/aarch64/\$MUSL_VER\" -o \"\$MUSL_CACHE\"; " +
+                "fi && " +
+                "cd '$prefix/tmp' && " +
+                "tar -xzf \"\$MUSL_CACHE\" lib/ld-musl-aarch64.so.1 2>/dev/null && " +
+                "cp '$prefix/tmp/lib/ld-musl-aarch64.so.1' '$muslLd' && " +
+                "chmod 755 '$muslLd' && " +
+                "rm -rf '$prefix/tmp/lib' && " +
+                "echo 'musl linker installed' 2>&1"
+            ) { line -> appendInstallLog(line) }
+        }
+
+        // Step 3: Patch ELF interpreter + Step 4: Patch platform detection
+        val nativeBin = "$prefix/lib/node_modules/@anthropic-ai/claude-code-linux-arm64-musl/claude"
+        appendInstallLog("Patching ELF interpreter...")
+        runShellCommand(
+            "cp '$nativeBin' '$claudeBin' 2>/dev/null && chmod 755 '$claudeBin' && " +
+            "node -e \"" +
+            "const fs = require('fs');" +
+            "const buf = fs.readFileSync('$claudeBin');" +
+            "const oldInterp = '/lib/ld-musl-aarch64.so.1';" +
+            "const newInterp = '$muslLd';" +
+            "const oldBuf = Buffer.from(oldInterp + '\\\\0');" +
+            "const idx = buf.indexOf(oldBuf);" +
+            "if (idx === -1) { console.log('Already patched'); process.exit(0); }" +
+            "const newBuf = Buffer.from(newInterp + '\\\\0');" +
+            "buf.fill(0, idx, idx + Math.max(oldBuf.length, newBuf.length));" +
+            "newBuf.copy(buf, idx);" +
+            "const e_phoff = Number(buf.readBigUInt64LE(32));" +
+            "const e_phentsize = buf.readUInt16LE(54);" +
+            "const e_phnum = buf.readUInt16LE(56);" +
+            "for (let i = 0; i < e_phnum; i++) {" +
+            "  const off = e_phoff + i * e_phentsize;" +
+            "  if (buf.readUInt32LE(off) === 3) {" +
+            "    buf.writeBigUInt64LE(BigInt(newBuf.length), off + 32);" +
+            "    buf.writeBigUInt64LE(BigInt(newBuf.length), off + 40);" +
+            "    break;" +
+            "  }" +
+            "}" +
+            "fs.writeFileSync('$claudeBin', buf);" +
+            "console.log('Interpreter patched');\" 2>&1"
+        ) { line -> appendInstallLog(line) }
+
+        // Step 4: Patch JS files for android platform detection
+        for (jsFile in listOf("install.cjs", "cli-wrapper.cjs")) {
+            runShellCommand(
+                "F='$claudePkgDir/$jsFile' && " +
+                "if [ -f \"\$F\" ] && ! grep -q 'android' \"\$F\"; then " +
+                "  sed -i 's/function getPlatformKey() {/function getPlatformKey() {\\n  if (process.platform === \"android\" \\&\\& require(\"os\").arch() === \"arm64\") return \"linux-arm64-musl\";/' \"\$F\" && " +
+                "  echo 'Patched $jsFile'; " +
+                "fi 2>&1"
+            ) { line -> appendInstallLog(line) }
+        }
+
+        // Step 5: Patch musl's hardcoded /etc/resolv.conf path
+        // musl libc (ld-musl-aarch64.so.1) hardcodes /etc/resolv.conf for DNS.
+        // On Android there is no /etc/resolv.conf — we deployed ours to $PREFIX/etc/.
+        // Binary-patch the musl linker to use the correct path.
+        appendInstallLog("Patching musl DNS resolver path...")
+        runShellCommand(
+            "node -e \"" +
+            "const fs = require('fs');" +
+            "const buf = fs.readFileSync('$muslLd');" +
+            "const oldPath = '/etc/resolv.conf';" +
+            "const newPath = '$prefix/etc/resolv.conf';" +
+            "const oldBuf = Buffer.from(oldPath + '\\\\0');" +
+            "const idx = buf.indexOf(oldBuf);" +
+            "if (idx === -1) { console.log('resolv.conf path already patched or not found'); process.exit(0); }" +
+            "const newBuf = Buffer.from(newPath + '\\\\0');" +
+            "buf.fill(0, idx, idx + Math.max(oldBuf.length, newBuf.length));" +
+            "newBuf.copy(buf, idx);" +
+            "fs.writeFileSync('$muslLd', buf);" +
+            "console.log('Patched: ' + oldPath + ' -> ' + newPath);\" 2>&1"
+        ) { line -> appendInstallLog(line) }
+
+        // Verify
+        runShellCommand("claude --version 2>&1 || echo 'claude binary still not working'") { line ->
+            appendInstallLog("Claude Code: $line")
         }
     }
 

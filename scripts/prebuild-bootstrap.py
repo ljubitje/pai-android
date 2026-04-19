@@ -49,6 +49,9 @@ def main() -> int:
 
     termux_files = "/data/data/com.termux/files"
     termux_cache = "/data/data/com.termux/cache"
+    # Also handle the old package name (kle.ljubitje.pai → kle.ljubitje.apai rename)
+    old_pkg_files = "/data/data/kle.ljubitje.pai/files"
+    old_pkg_cache = "/data/data/kle.ljubitje.pai/cache"
     app_files = f"/data/data/{pkg}/files"
     app_cache = f"/data/data/{pkg}/cache"
     app_home = f"{app_files}/home"
@@ -88,11 +91,14 @@ def main() -> int:
             # Skip ELF binaries
             if len(data) >= 4 and data[:4] == b"\x7fELF":
                 pass
-            elif termux_files.encode() in data or termux_cache.encode() in data:
+            elif (termux_files.encode() in data or termux_cache.encode() in data
+                  or old_pkg_files.encode() in data or old_pkg_cache.encode() in data):
                 try:
                     text = data.decode("utf-8")
                     text = text.replace(termux_cache, app_cache)
                     text = text.replace(termux_files, app_files)
+                    text = text.replace(old_pkg_cache, app_cache)
+                    text = text.replace(old_pkg_files, app_files)
                     # After replacing termux_files, references to the hardcoded
                     # home dir become absolute references into app-files/home.
                     # The runtime used to convert these to $HOME; do the same.
