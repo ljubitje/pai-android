@@ -40,11 +40,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kle.ljubitje.apai.ui.theme.ApaiGreen
+import kle.ljubitje.apai.ui.theme.ClaudeOrange
 import kle.ljubitje.apai.ui.theme.PAITheme
+import kle.ljubitje.apai.ui.theme.PaiBrandBlue
 import java.io.File
 
 class SettingsActivity : ComponentActivity() {
@@ -237,8 +243,6 @@ fun SettingsScreen(
         SettingsCard {
             InfoRow("App Version", appVersion)
             CardDivider()
-            InfoRow("PAI Version", detectPaiVersion(home))
-            CardDivider()
             InfoRow("Package", "kle.ljubitje.apai")
         }
 
@@ -248,15 +252,17 @@ fun SettingsScreen(
         SectionHeader("Components")
 
         SettingsCard {
-            ComponentRow("Node.js", detectVersion(prefix, "node --version"))
+            ComponentRow("PAI", detectPaiVersion(home), nameColor = PaiBrandBlue)
             CardDivider()
-            ComponentRow("Claude Code", detectVersion(prefix, "claude --version"))
+            ComponentRow("Claude Code", detectVersion(prefix, "claude --version"), nameColor = ClaudeOrange)
+            CardDivider()
+            ComponentRow("Node.js", detectVersion(prefix, "node --version"))
             CardDivider()
             ComponentRow("Git", detectVersion(prefix, "git --version"))
             CardDivider()
-            ComponentRow("Bun (shim)", if (File("$prefix/bin/bun").exists()) "Active" else "Not found")
-            CardDivider()
             ComponentRow("tsx", detectVersion(prefix, "tsx --version"))
+            CardDivider()
+            ComponentRow("Bun (shim)", if (File("$prefix/bin/bun").exists()) "Active" else "Not found")
             CardDivider()
             ComponentRow("proot", if (File("$prefix/bin/proot").exists()) "Installed" else "Not found")
         }
@@ -346,7 +352,11 @@ fun SettingsScreen(
 
         // Footer
         Text(
-            text = "PAI \u2014 Personal AI Infrastructure",
+            text = buildAnnotatedString {
+                withStyle(SpanStyle(color = ApaiGreen)) { append("APAI") }
+                append(" \u2014 Android ")
+                withStyle(SpanStyle(color = PaiBrandBlue)) { append("PAI") }
+            },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
             modifier = Modifier.fillMaxWidth(),
@@ -419,7 +429,7 @@ fun InfoRow(label: String, value: String) {
 }
 
 @Composable
-fun ComponentRow(name: String, status: String) {
+fun ComponentRow(name: String, status: String, nameColor: Color? = null) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -430,7 +440,8 @@ fun ComponentRow(name: String, status: String) {
         Text(
             text = name,
             style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurface,
+            color = nameColor ?: MaterialTheme.colorScheme.onSurface,
+            fontWeight = if (nameColor != null) FontWeight.SemiBold else FontWeight.Normal,
         )
 
         val isInstalled = status != "Not found" && status != "Error"

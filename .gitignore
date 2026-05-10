@@ -19,3 +19,8 @@ MEMORY/
 **/build/intermediates/cxx/
 **/compileTransaction/
 PLAN.md
+
+# Logo work (not finalized — drafts kept locally, not in repo)
+/logosNotGood.png
+/apai-logo-drafts.html
+/app/src/main/res/drawable/ic_launcher_foreground_draft*.xml

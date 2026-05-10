@@ -16,6 +16,11 @@ private val PaiSurface = Color(0xFF161B22)
 private val PaiOnSurface = Color(0xFFE6EDF3)
 private val PaiMuted = Color(0xFF8B949E)
 
+// Brand colors — used directly in UI, not via MaterialTheme
+val ApaiGreen = Color(0xFF3FB950)   // APAI (the app)
+val PaiBrandBlue = Color(0xFF58A6FF) // PAI (the component)
+val ClaudeOrange = Color(0xFFF78166) // Claude Code
+
 private val PaiColorScheme = darkColorScheme(
     primary = PaiBlue,
     onPrimary = Color.White,

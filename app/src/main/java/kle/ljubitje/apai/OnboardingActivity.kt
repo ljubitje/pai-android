@@ -53,12 +53,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kle.ljubitje.apai.ui.theme.ApaiGreen
+import kle.ljubitje.apai.ui.theme.ClaudeOrange
 import kle.ljubitje.apai.ui.theme.PAITheme
+import kle.ljubitje.apai.ui.theme.PaiBrandBlue
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
@@ -89,12 +96,12 @@ class OnboardingActivity : ComponentActivity() {
     private var setupError by mutableStateOf<String?>(null)
     private var currentStepIndex by mutableIntStateOf(0)
     private val setupSteps = mutableStateListOf(
-        SetupStep("Extracting base system", StepStatus.PENDING),
-        SetupStep("Configuring package manager", StepStatus.PENDING),
-        SetupStep("Updating packages", StepStatus.PENDING),
-        SetupStep("Installing prerequisites", StepStatus.PENDING),
-        SetupStep("Installing Bun", StepStatus.PENDING),
-        SetupStep("Finalizing setup", StepStatus.PENDING),
+        SetupStep("Extracting base system", StepStatus.PENDING, accentColor = ApaiGreen),
+        SetupStep("Configuring package manager", StepStatus.PENDING, accentColor = ApaiGreen),
+        SetupStep("Updating packages", StepStatus.PENDING, accentColor = ApaiGreen),
+        SetupStep("Installing prerequisites", StepStatus.PENDING, accentColor = ApaiGreen),
+        SetupStep("Installing Bun", StepStatus.PENDING, accentColor = ApaiGreen),
+        SetupStep("Finalizing setup", StepStatus.PENDING, accentColor = ApaiGreen),
     )
     private val logLines = mutableStateListOf<String>()
 
@@ -104,9 +111,9 @@ class OnboardingActivity : ComponentActivity() {
     private var installStepIndex by mutableIntStateOf(0)
     private val installSteps = mutableStateListOf(
         SetupStep("Installing Node.js", StepStatus.PENDING),
-        SetupStep("Installing Claude Code", StepStatus.PENDING),
-        SetupStep("Cloning PAI repository", StepStatus.PENDING),
-        SetupStep("Deploying PAI", StepStatus.PENDING),
+        SetupStep("Installing Claude Code", StepStatus.PENDING, accentColor = ClaudeOrange),
+        SetupStep("Cloning PAI repository", StepStatus.PENDING, accentColor = PaiBrandBlue),
+        SetupStep("Deploying PAI", StepStatus.PENDING, accentColor = PaiBrandBlue),
     )
     private val installLogLines = mutableStateListOf<String>()
 
@@ -183,22 +190,30 @@ class OnboardingActivity : ComponentActivity() {
                                 },
                             )
                             "setup" -> ProgressScreen(
-                                title = "Setting up PAI",
+                                title = buildAnnotatedString {
+                                    append("Setting up ")
+                                    withStyle(SpanStyle(color = ApaiGreen)) { append("APAI") }
+                                },
                                 subtitle = "This may take a few minutes",
                                 steps = setupSteps,
                                 progress = setupProgress,
                                 logLines = logLines,
                                 error = setupError,
                                 onRetry = ::startSetup,
+                                accentColor = ApaiGreen,
                             )
                             "install" -> ProgressScreen(
-                                title = "Installing PAI",
+                                title = buildAnnotatedString {
+                                    append("Installing ")
+                                    withStyle(SpanStyle(color = PaiBrandBlue)) { append("PAI") }
+                                },
                                 subtitle = "Setting up your AI infrastructure",
                                 steps = installSteps,
                                 progress = installProgress,
                                 logLines = installLogLines,
                                 error = installError,
                                 onRetry = ::startPaiInstall,
+                                accentColor = PaiBrandBlue,
                             )
                             "ready" -> ReadyScreen(
                                 onInstallPai = ::startPaiInstall,
@@ -1408,6 +1423,7 @@ class OnboardingActivity : ComponentActivity() {
 data class SetupStep(
     val name: String,
     val status: StepStatus,
+    val accentColor: Color? = null,
 )
 
 enum class StepStatus { PENDING, ACTIVE, DONE, ERROR }
@@ -1854,13 +1870,14 @@ fun ExistingInstallConfirmScreen(
 
 @Composable
 fun ProgressScreen(
-    title: String,
+    title: AnnotatedString,
     subtitle: String,
     steps: List<SetupStep>,
     progress: Float,
     logLines: List<String>,
     error: String?,
     onRetry: () -> Unit,
+    accentColor: Color = MaterialTheme.colorScheme.primary,
 ) {
     Column(
         modifier = Modifier
@@ -1896,7 +1913,7 @@ fun ProgressScreen(
                 .fillMaxWidth()
                 .height(6.dp)
                 .clip(RoundedCornerShape(3.dp)),
-            color = if (error != null) Color(0xFFF85149) else MaterialTheme.colorScheme.primary,
+            color = if (error != null) Color(0xFFF85149) else accentColor,
             trackColor = MaterialTheme.colorScheme.surfaceVariant,
             strokeCap = StrokeCap.Round,
         )
@@ -2010,7 +2027,7 @@ fun StepRow(step: SetupStep) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(20.dp),
                         strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = step.accentColor ?: MaterialTheme.colorScheme.primary,
                     )
                 }
                 StepStatus.DONE -> {
@@ -2018,7 +2035,7 @@ fun StepRow(step: SetupStep) {
                         modifier = Modifier
                             .size(20.dp)
                             .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.secondary),
+                            .background(step.accentColor ?: MaterialTheme.colorScheme.secondary),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
@@ -2056,8 +2073,8 @@ fun StepRow(step: SetupStep) {
             fontSize = 14.sp,
             color = when (step.status) {
                 StepStatus.PENDING -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                StepStatus.ACTIVE -> MaterialTheme.colorScheme.onBackground
-                StepStatus.DONE -> MaterialTheme.colorScheme.secondary
+                StepStatus.ACTIVE -> step.accentColor ?: MaterialTheme.colorScheme.onBackground
+                StepStatus.DONE -> step.accentColor ?: MaterialTheme.colorScheme.secondary
                 StepStatus.ERROR -> Color(0xFFF85149)
             },
             fontWeight = if (step.status == StepStatus.ACTIVE) FontWeight.Medium else FontWeight.Normal,
@@ -2082,14 +2099,14 @@ fun ReadyScreen(
             modifier = Modifier
                 .size(80.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                .background(ApaiGreen.copy(alpha = 0.15f)),
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                text = "PAI",
-                fontSize = 24.sp,
+                text = "APAI",
+                fontSize = 22.sp,
                 fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary,
+                color = ApaiGreen,
             )
         }
 
@@ -2104,7 +2121,13 @@ fun ReadyScreen(
         Spacer(Modifier.height(12.dp))
 
         Text(
-            text = "Your development environment is set up.\nTap below to install PAI — your\nPersonal AI Infrastructure.",
+            text = buildAnnotatedString {
+                append("Your ")
+                withStyle(SpanStyle(color = ApaiGreen, fontWeight = FontWeight.SemiBold)) { append("APAI") }
+                append(" environment is set up.\nTap below to install ")
+                withStyle(SpanStyle(color = PaiBrandBlue, fontWeight = FontWeight.SemiBold)) { append("PAI") }
+                append(" \u2014 Personal AI Infrastructure.")
+            },
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
@@ -2120,7 +2143,7 @@ fun ReadyScreen(
                 .height(56.dp),
             shape = RoundedCornerShape(16.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.primary,
+                containerColor = PaiBrandBlue,
                 contentColor = Color.White
             )
         ) {
