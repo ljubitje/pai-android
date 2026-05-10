@@ -5,31 +5,64 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- PAI logo v7: 5-row geometric block grid -->
-    <!-- Safe zone is 66x66 centered (21,21 to 87,87) -->
-    <!-- Row height=11, gap=3. Columns: left(15), gap(18), mid(16), right(17) -->
+    <!-- APAI logo: 5-row geometric block grid, 4-letter layout -->
+    <!-- Safe zone 66x66: (21,21) to (87,87) -->
+    <!-- 4 columns: A(13w) P(13w) A(13w) I(9w), gaps=3, row h=11, row gap=3 -->
+    <!-- Colors: A=Green (#3FB950/#2EA043), P=Blue (#58A6FF), I=Light green (#7EE787) -->
 
-    <!-- Row 1: full bar dark navy (21-70) + light blue (70-87) -->
-    <path android:fillColor="#002B80" android:pathData="M21,21 h49 v11 h-49 z"/>
-    <path android:fillColor="#A3CFFF" android:pathData="M70,21 h17 v11 h-17 z"/>
+    <!-- === Column 1: A === -->
+    <!-- Row 1: top bar -->
+    <path android:fillColor="#3FB950" android:pathData="M23,21 h9 v11 h-9 z"/>
+    <!-- Row 2: left + right pillars -->
+    <path android:fillColor="#2EA043" android:pathData="M21,35 h5 v11 h-5 z"/>
+    <path android:fillColor="#2EA043" android:pathData="M30,35 h5 v11 h-5 z"/>
+    <!-- Row 3: crossbar -->
+    <path android:fillColor="#3FB950" android:pathData="M21,49 h14 v11 h-14 z"/>
+    <!-- Row 4: pillars -->
+    <path android:fillColor="#2EA043" android:pathData="M21,63 h5 v11 h-5 z"/>
+    <path android:fillColor="#2EA043" android:pathData="M30,63 h5 v11 h-5 z"/>
+    <!-- Row 5: pillars -->
+    <path android:fillColor="#2EA043" android:pathData="M21,77 h5 v11 h-5 z"/>
+    <path android:fillColor="#2EA043" android:pathData="M30,77 h5 v11 h-5 z"/>
 
-    <!-- Row 2: left dark (21-36), mid dark (54-70), right light (70-87) -->
-    <path android:fillColor="#002B80" android:pathData="M21,35 h15 v11 h-15 z"/>
-    <path android:fillColor="#002B80" android:pathData="M54,35 h16 v11 h-16 z"/>
-    <path android:fillColor="#A3CFFF" android:pathData="M70,35 h17 v11 h-17 z"/>
+    <!-- === Column 2: P === -->
+    <!-- Row 1: full bar -->
+    <path android:fillColor="#58A6FF" android:pathData="M38,21 h14 v11 h-14 z"/>
+    <!-- Row 2: left pillar + right cap -->
+    <path android:fillColor="#58A6FF" android:pathData="M38,35 h5 v11 h-5 z"/>
+    <path android:fillColor="#79C0FF" android:pathData="M47,35 h5 v11 h-5 z"/>
+    <!-- Row 3: crossbar -->
+    <path android:fillColor="#58A6FF" android:pathData="M38,49 h14 v11 h-14 z"/>
+    <!-- Row 4: pillar only -->
+    <path android:fillColor="#58A6FF" android:pathData="M38,63 h5 v11 h-5 z"/>
+    <!-- Row 5: pillar only -->
+    <path android:fillColor="#58A6FF" android:pathData="M38,77 h5 v11 h-5 z"/>
 
-    <!-- Row 3: full bar dark navy (21-70) + light blue (70-87) -->
-    <path android:fillColor="#002B80" android:pathData="M21,49 h49 v11 h-49 z"/>
-    <path android:fillColor="#A3CFFF" android:pathData="M70,49 h17 v11 h-17 z"/>
+    <!-- === Column 3: A === -->
+    <!-- Row 1: top bar -->
+    <path android:fillColor="#3FB950" android:pathData="M57,21 h9 v11 h-9 z"/>
+    <!-- Row 2: left + right pillars -->
+    <path android:fillColor="#2EA043" android:pathData="M55,35 h5 v11 h-5 z"/>
+    <path android:fillColor="#2EA043" android:pathData="M64,35 h5 v11 h-5 z"/>
+    <!-- Row 3: crossbar -->
+    <path android:fillColor="#3FB950" android:pathData="M55,49 h14 v11 h-14 z"/>
+    <!-- Row 4: pillars -->
+    <path android:fillColor="#2EA043" android:pathData="M55,63 h5 v11 h-5 z"/>
+    <path android:fillColor="#2EA043" android:pathData="M64,63 h5 v11 h-5 z"/>
+    <!-- Row 5: pillars -->
+    <path android:fillColor="#2EA043" android:pathData="M55,77 h5 v11 h-5 z"/>
+    <path android:fillColor="#2EA043" android:pathData="M64,77 h5 v11 h-5 z"/>
 
-    <!-- Row 4: left dark (21-36), mid cornflower (54-70), right light (70-87) -->
-    <path android:fillColor="#002B80" android:pathData="M21,63 h15 v11 h-15 z"/>
-    <path android:fillColor="#5B9BFF" android:pathData="M54,63 h16 v11 h-16 z"/>
-    <path android:fillColor="#A3CFFF" android:pathData="M70,63 h17 v11 h-17 z"/>
-
-    <!-- Row 5: left dark (21-36), mid cornflower (54-70), right light (70-87) -->
-    <path android:fillColor="#002B80" android:pathData="M21,77 h15 v11 h-15 z"/>
-    <path android:fillColor="#5B9BFF" android:pathData="M54,77 h16 v11 h-16 z"/>
-    <path android:fillColor="#A3CFFF" android:pathData="M70,77 h17 v11 h-17 z"/>
+    <!-- === Column 4: I === -->
+    <!-- Row 1: top bar -->
+    <path android:fillColor="#7EE787" android:pathData="M72,21 h15 v11 h-15 z"/>
+    <!-- Row 2: center pillar -->
+    <path android:fillColor="#7EE787" android:pathData="M76,35 h7 v11 h-7 z"/>
+    <!-- Row 3: center pillar -->
+    <path android:fillColor="#7EE787" android:pathData="M76,49 h7 v11 h-7 z"/>
+    <!-- Row 4: center pillar -->
+    <path android:fillColor="#7EE787" android:pathData="M76,63 h7 v11 h-7 z"/>
+    <!-- Row 5: bottom bar -->
+    <path android:fillColor="#7EE787" android:pathData="M72,77 h15 v11 h-15 z"/>
 
 </vector>
